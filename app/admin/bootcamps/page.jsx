@@ -143,6 +143,9 @@ export default function BootcampsPage() {
                 <button className="btn ghost sm" onClick={() => router.push(`/admin/bootcamps/${b.id}`)}>
                   Edit
                 </button>
+                <button className="btn ghost sm" onClick={() => router.push(`/admin/bootcamps/${b.id}/preview`)}>
+                  Preview
+                </button>
                 <button className="btn ghost sm" disabled={busy} onClick={() => duplicate(b.id)}>
                   Duplicate
                 </button>
