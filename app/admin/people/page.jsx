@@ -1,7 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/utils/supabase/client";
+
+const PEOPLE_COLUMNS = [
+  { k: "name", label: "Name" },
+  { k: "status", label: "Status" },
+  { k: "role", label: "Role" },
+];
+
+const ROLE_RANK = { owner: 0, admin: 1, student: 2 };
 
 export default function PeoplePage() {
   const supabase = createClient();
@@ -21,6 +29,13 @@ export default function PeoplePage() {
   const [err, setErr] = useState("");
   const [roleBusyId, setRoleBusyId] = useState(null);
   const [removeBusyId, setRemoveBusyId] = useState(null);
+
+  const [sortKey, setSortKey] = useState("role");
+  const [sortDir, setSortDir] = useState("asc");
+  const [openCol, setOpenCol] = useState(null);
+  const [fName, setFName] = useState("");
+  const [fStatus, setFStatus] = useState("");
+  const [fRole, setFRole] = useState("");
 
   async function loadPeople() {
     const { data } = await supabase
@@ -138,6 +153,146 @@ export default function PeoplePage() {
     }
   }
 
+  const anyFilter = !!(fName || fStatus || fRole);
+
+  function clearFilters() {
+    setFName("");
+    setFStatus("");
+    setFRole("");
+  }
+
+  function colFiltered(key) {
+    return (
+      (key === "name" && !!fName) ||
+      (key === "status" && !!fStatus) ||
+      (key === "role" && !!fRole)
+    );
+  }
+
+  function applySort(key, dir) {
+    setSortKey(key);
+    setSortDir(dir);
+  }
+
+  function nameOf(p) {
+    return (p.full_name || p.email || "").toString();
+  }
+
+  const filtered = useMemo(() => {
+    const q = fName.trim().toLowerCase();
+    return people.filter((p) => {
+      if (q && !`${p.full_name || ""} ${p.email || ""}`.toLowerCase().includes(q)) return false;
+      if (fStatus && p.status !== fStatus) return false;
+      if (fRole && p.role !== fRole) return false;
+      return true;
+    });
+  }, [people, fName, fStatus, fRole]);
+
+  const sorted = useMemo(() => {
+    const rows = [...filtered];
+    const dir = sortDir === "asc" ? 1 : -1;
+    const nameCmp = (a, b) => nameOf(a).localeCompare(nameOf(b));
+    rows.sort((a, b) => {
+      if (sortKey === "name") return nameCmp(a, b) * dir;
+      if (sortKey === "status")
+        return String(a.status).localeCompare(String(b.status)) * dir || nameCmp(a, b);
+      if (sortKey === "role")
+        return ((ROLE_RANK[a.role] ?? 9) - (ROLE_RANK[b.role] ?? 9)) * dir || nameCmp(a, b);
+      return 0;
+    });
+    return rows;
+  }, [filtered, sortKey, sortDir]);
+
+  function sortLabels(key) {
+    if (key === "role") return ["Owner first", "Student first"];
+    if (key === "status") return ["Active first", "Invited first"];
+    return ["A → Z", "Z → A"];
+  }
+
+  function OptionList({ current, setter, options }) {
+    return options.map((o) => (
+      <button
+        key={o.v}
+        className={`menu-item ${current === o.v ? "active" : ""}`}
+        type="button"
+        onClick={() => {
+          setter(o.v);
+          setOpenCol(null);
+        }}
+      >
+        {o.l}
+      </button>
+    ));
+  }
+
+  function renderFilter(key) {
+    if (key === "name") {
+      return (
+        <input
+          className="menu-input"
+          placeholder="Contains…"
+          value={fName}
+          autoFocus
+          onChange={(e) => setFName(e.target.value)}
+        />
+      );
+    }
+    if (key === "status") {
+      return (
+        <OptionList
+          current={fStatus}
+          setter={setFStatus}
+          options={[
+            { v: "", l: "All" },
+            { v: "active", l: "Active" },
+            { v: "invited", l: "Invited" },
+          ]}
+        />
+      );
+    }
+    return (
+      <OptionList
+        current={fRole}
+        setter={setFRole}
+        options={[
+          { v: "", l: "All" },
+          { v: "owner", l: "owner" },
+          { v: "admin", l: "admin" },
+          { v: "student", l: "student" },
+        ]}
+      />
+    );
+  }
+
+  function ColumnMenu({ col }) {
+    const [asc, desc] = sortLabels(col.k);
+    return (
+      <div className="col-menu" onClick={(e) => e.stopPropagation()}>
+        <div className="menu-sec">
+          <div className="menu-lbl">Sort</div>
+          <button
+            className={`menu-item ${sortKey === col.k && sortDir === "asc" ? "active" : ""}`}
+            type="button"
+            onClick={() => applySort(col.k, "asc")}
+          >
+            {asc}
+          </button>
+          <button
+            className={`menu-item ${sortKey === col.k && sortDir === "desc" ? "active" : ""}`}
+            type="button"
+            onClick={() => applySort(col.k, "desc")}
+          >
+            {desc}
+          </button>
+        </div>
+        <div className="menu-sec">
+          <div className="menu-lbl">Filter</div>
+          {renderFilter(col.k)}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="eyebrow">People</div>
@@ -211,66 +366,99 @@ export default function PeoplePage() {
       ) : people.length === 0 ? (
         <div className="stub">No one here yet. Create an invite above to get started.</div>
       ) : (
-        <div className="dtable-wrap">
-          <table className="dtable">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Status</th>
-                <th style={{ width: 190 }}>Role</th>
-                <th style={{ width: 90 }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {people.map((p) => {
-                const isSelf = me && p.id === me.id;
-                const isOwnerRow = p.role === "owner";
-                const canEditRole = isOwner && !isSelf && !isOwnerRow;
-                const canRemove = !isSelf && !isOwnerRow;
-                return (
-                  <tr key={p.id}>
-                    <td>
-                      <div className="dt-name">{p.full_name || "—"}</div>
-                      <div className="dt-mail">{p.email}</div>
-                    </td>
-                    <td>
-                      <span className={`pill ${p.status === "invited" ? "pill-warn" : "pill-ok"}`}>
-                        {p.status === "invited" ? "Invited" : "Active"}
-                      </span>
-                    </td>
-                    <td>
-                      {canEditRole ? (
-                        <select
-                          className="input role-select"
-                          value={p.role}
-                          disabled={roleBusyId === p.id}
-                          onChange={(e) => changeRole(p, e.target.value)}
-                        >
-                          <option value="student">student</option>
-                          <option value="admin">admin</option>
-                        </select>
-                      ) : (
-                        <span className={`rolechip ${isOwnerRow ? "owner" : ""}`}>{p.role}</span>
-                      )}
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      {canRemove && (
-                        <button
-                          className="btn danger sm"
-                          type="button"
-                          disabled={removeBusyId === p.id}
-                          onClick={() => removePerson(p)}
-                        >
-                          {removeBusyId === p.id ? "Removing…" : "Remove"}
-                        </button>
-                      )}
-                    </td>
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "0 0 10px" }}>
+            <span className="note">
+              Showing {sorted.length} of {people.length}
+              {anyFilter ? (
+                <>
+                  {" · "}
+                  <button className="btn link sm" type="button" onClick={clearFilters}>Clear filters</button>
+                </>
+              ) : null}
+            </span>
+          </div>
+          <div className="dtable-wrap">
+            <table className="dtable">
+              <thead>
+                <tr>
+                  {PEOPLE_COLUMNS.map((col) => (
+                    <th key={col.k} className="th-h" style={col.k === "role" ? { width: 190 } : undefined}>
+                      <button
+                        className={`th-btn ${openCol === col.k ? "open" : ""}`}
+                        type="button"
+                        onClick={() => setOpenCol((c) => (c === col.k ? null : col.k))}
+                      >
+                        {col.label}
+                        <span className="hdr-marks">
+                          {sortKey === col.k && <span className="sort-ind">{sortDir === "asc" ? "▲" : "▼"}</span>}
+                          {colFiltered(col.k) && <span className="filter-dot" />}
+                          <span className="caret">▾</span>
+                        </span>
+                      </button>
+                      {openCol === col.k && <ColumnMenu col={col} />}
+                    </th>
+                  ))}
+                  <th style={{ width: 90 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="dt-empty">No one matches your filters.</td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                ) : (
+                  sorted.map((p) => {
+                    const isSelf = me && p.id === me.id;
+                    const isOwnerRow = p.role === "owner";
+                    const canEditRole = isOwner && !isSelf && !isOwnerRow;
+                    const canRemove = !isSelf && !isOwnerRow;
+                    return (
+                      <tr key={p.id}>
+                        <td>
+                          <div className="dt-name">{p.full_name || "—"}</div>
+                          <div className="dt-mail">{p.email}</div>
+                        </td>
+                        <td>
+                          <span className={`pill ${p.status === "invited" ? "pill-warn" : "pill-ok"}`}>
+                            {p.status === "invited" ? "Invited" : "Active"}
+                          </span>
+                        </td>
+                        <td>
+                          {canEditRole ? (
+                            <select
+                              className="input role-select"
+                              value={p.role}
+                              disabled={roleBusyId === p.id}
+                              onChange={(e) => changeRole(p, e.target.value)}
+                            >
+                              <option value="student">student</option>
+                              <option value="admin">admin</option>
+                            </select>
+                          ) : (
+                            <span className={`rolechip ${isOwnerRow ? "owner" : ""}`}>{p.role}</span>
+                          )}
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {canRemove && (
+                            <button
+                              className="btn danger sm"
+                              type="button"
+                              disabled={removeBusyId === p.id}
+                              onClick={() => removePerson(p)}
+                            >
+                              {removeBusyId === p.id ? "Removing…" : "Remove"}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
 
       {!isOwner && !loading && (
@@ -278,6 +466,8 @@ export default function PeoplePage() {
           Only the owner account can change roles.
         </div>
       )}
+
+      {openCol && <div className="menu-overlay" onClick={() => setOpenCol(null)} />}
     </>
   );
 }
