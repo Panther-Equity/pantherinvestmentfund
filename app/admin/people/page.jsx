@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { createClient } from "@/utils/supabase/client";
 
 const PEOPLE_COLUMNS = [
@@ -416,7 +417,13 @@ export default function PeoplePage() {
                     return (
                       <tr key={p.id}>
                         <td>
-                          <div className="dt-name">{p.full_name || "—"}</div>
+                          <Link
+                            href={`/admin/people/${p.id}`}
+                            title="View progress"
+                            style={{ color: "inherit", textDecoration: "none" }}
+                          >
+                            <span className="dt-name" style={{ display: "block" }}>{p.full_name || "—"}</span>
+                          </Link>
                           <div className="dt-mail">{p.email}</div>
                         </td>
                         <td>
