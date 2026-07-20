@@ -115,6 +115,7 @@ export default function LearnPlayer({ bootcampId }) {
   const [answers, setAnswers] = useState({});
   const [submitted, setSubmitted] = useState({});
   const [current, setCurrent] = useState(0);
+  const [view, setView] = useState("map"); // "map" | "lesson" — course opens on the tile map
   const [attempts, setAttempts] = useState({}); // item_id -> { started_at, submitted_at }
   const [videoProgress, setVideoProgress] = useState({}); // item_id -> furthest_seconds watched
   const [nowTs, setNowTs] = useState(Date.now());
@@ -329,6 +330,15 @@ export default function LearnPlayer({ bootcampId }) {
     setCurrent(idx);
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
+  function enterItem(idx) {
+    setCurrent(idx);
+    setView("lesson");
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  function backToMap() {
+    setView("map");
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   async function toggleComplete(it) {
     if (completed.has(it.id)) {
@@ -424,6 +434,82 @@ export default function LearnPlayer({ bootcampId }) {
   async function downloadWorkbook() {
     const { data } = await supabase.storage.from("workbooks").createSignedUrl(bc.workbook_path, 3600);
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+  }
+
+  // Tile-map course entry screen: shown first when opening a bootcamp.
+  // Every item is always clickable (locked decision: free navigation, no
+  // sequential locking) — the map is just a different layout for the same
+  // click-to-jump behavior the sidebar list already has.
+  function renderMap() {
+    return (
+      <div>
+        <button className="btn link" onClick={() => router.push("/learn")}>
+          ← All bootcamps
+        </button>
+        <div style={{ margin: "14px 0 22px" }}>
+          {bc?.audience ? <span className="badge b-aud">{bc.audience}</span> : null}
+          <h2 className="player-title" style={{ margin: "8px 0 10px" }}>{bc?.name}</h2>
+          <div className="pbar" style={{ maxWidth: 420 }}>
+            <div className="pbar-fill" style={{ width: `${pct}%` }} />
+          </div>
+          <div className="note" style={{ margin: "8px 0 0" }}>{pct}% complete</div>
+        </div>
+        {items.length === 0 ? (
+          <div className="stub">No content in this bootcamp yet.</div>
+        ) : (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+              gap: 14,
+            }}
+          >
+            {items.map((it, idx) => {
+              const done = completed.has(it.id);
+              const score = submitted[it.id];
+              return (
+                <div
+                  key={it.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => enterItem(idx)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") enterItem(idx);
+                  }}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    minHeight: 112,
+                    padding: 14,
+                    borderRadius: "var(--r)",
+                    border: `1px solid ${done ? "var(--indigo)" : "var(--line-d)"}`,
+                    background: done ? "var(--indigo-t)" : "var(--wash)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span className="note" style={{ fontSize: 11 }}>
+                      {idx + 1} · {kindShort(it.type)}
+                    </span>
+                    <span className={`navcheck ${done ? "done" : ""}`}>{done ? "✓" : ""}</span>
+                  </div>
+                  <div style={{ fontWeight: 600, fontSize: 14, lineHeight: 1.35, color: "var(--ink)" }}>
+                    {it.title}
+                  </div>
+                  {score ? (
+                    <div className="note" style={{ fontSize: 12 }}>
+                      {score.score}/{score.total}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
   }
 
   function renderItem(it) {
@@ -579,10 +665,14 @@ export default function LearnPlayer({ bootcampId }) {
 
   const item = items[current];
 
+  if (view === "map") {
+    return renderMap();
+  }
+
   return (
     <div>
-      <button className="btn link" onClick={() => router.push("/learn")}>
-        ← All bootcamps
+      <button className="btn link" onClick={backToMap}>
+        ← Course map
       </button>
 
       <div className="player">
@@ -624,7 +714,7 @@ export default function LearnPlayer({ bootcampId }) {
                 {current + 1} of {items.length}
               </span>
               {current === items.length - 1 ? (
-                <button className="btn pri" onClick={() => router.push("/learn")}>
+                <button className="btn pri" onClick={backToMap}>
                   Finish ✓
                 </button>
               ) : (
