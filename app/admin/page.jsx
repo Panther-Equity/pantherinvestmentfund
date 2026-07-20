@@ -150,6 +150,14 @@ export default function AdminDashboardPage() {
     return dt.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
   }
 
+  // @feature: progress-bar-red-to-green-v1
+  // 0% -> red (hue 0), 100% -> green (hue 120). Same bar shape/size, just a
+  // color ramp so a glance at the roster shows who's behind vs. on track.
+  function progressColor(pct) {
+    const hue = Math.max(0, Math.min(100, pct)) * 1.2;
+    return `hsl(${hue}, 65%, 45%)`;
+  }
+
   function exportCsv() {
     const head = ["Name", "Email", "Bootcamp", "Cohort", "Progress %", "Deadline"];
     const lines = [head.join(",")];
@@ -365,7 +373,7 @@ export default function AdminDashboardPage() {
                     <td>
                       <div className="prog">
                         <span className="minibar">
-                          <span className="minibar-fill" style={{ width: `${r.pct}%` }} />
+                          <span className="minibar-fill" style={{ width: `${r.pct}%`, background: progressColor(r.pct) }} />
                         </span>
                         <span className="prog-pct">{r.pct}%</span>
                       </div>
