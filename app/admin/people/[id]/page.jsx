@@ -50,7 +50,8 @@ export default function LearnerDetailPage() {
 
     let items = [],
       comps = [],
-      scores = [];
+      scores = [],
+      timeProg = []; // @feature: time-based-progress-v1
     if (bootcampIds.length) {
       const { data: its } = await supabase
         .from("items")
@@ -60,16 +61,23 @@ export default function LearnerDetailPage() {
       items = its || [];
     }
     if (enrollmentIds.length) {
-      const [{ data: c }, { data: s }] = await Promise.all([
+      const [{ data: c }, { data: s }, { data: tp }] = await Promise.all([
         supabase.from("completions").select("enrollment_id, item_id").in("enrollment_id", enrollmentIds),
         supabase
           .from("quiz_scores")
           .select("enrollment_id, item_id, score, total")
           .in("enrollment_id", enrollmentIds),
+        supabase
+          .from("enrollment_time_progress") // @feature: time-based-progress-v1
+          .select("enrollment_id, time_pct")
+          .in("enrollment_id", enrollmentIds),
       ]);
       comps = c || [];
       scores = s || [];
+      timeProg = tp || [];
     }
+
+    const timePctMap = Object.fromEntries(timeProg.map((t) => [t.enrollment_id, t.time_pct])); // @feature: time-based-progress-v1
 
     const assembled = enrollments.map((e) => {
       const its = items.filter((i) => i.bootcamp_id === e.bootcamp_id);
@@ -83,6 +91,7 @@ export default function LearnerDetailPage() {
       const doneW = its.filter((i) => compSet.has(i.id)).reduce((sum, i) => sum + (i.weight || 1), 0);
       const pct = totalW ? Math.round((100 * doneW) / totalW) : 0;
       const doneCount = its.filter((i) => compSet.has(i.id)).length;
+      const rawTimePct = timePctMap[e.id]; // @feature: time-based-progress-v1
       return {
         id: e.id,
         bootcampName: e.bootcamps?.name || "—",
@@ -90,6 +99,7 @@ export default function LearnerDetailPage() {
         cohortName: e.cohorts?.name || null,
         deadline: e.deadline,
         pct,
+        timePct: rawTimePct == null ? null : Math.round(rawTimePct), // @feature: time-based-progress-v1
         doneCount,
         total: its.length,
         items: its.map((i) => ({
@@ -179,6 +189,10 @@ export default function LearnerDetailPage() {
                   </div>
                   <div className="note">
                     {r.doneCount} / {r.total} done
+                  </div>
+                  {/* @feature: time-based-progress-v1 — admin-only, staff view only */}
+                  <div className="note" style={{ marginTop: 2 }}>
+                    Time: {r.timePct == null ? "—" : `${r.timePct}%`}
                   </div>
                 </div>
               </div>

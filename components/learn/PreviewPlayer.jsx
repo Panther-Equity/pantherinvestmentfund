@@ -224,6 +224,33 @@ export default function PreviewPlayer({ bootcampId }) {
         width: "100%",
         height: "100%",
         playerVars: { rel: 0, modestbranding: 1 },
+        events: {
+          // @feature: time-based-progress-v1
+          // Auto-capture video duration into items.duration_seconds the moment
+          // staff previews it — this is the ONLY place duration gets written,
+          // since only staff has write access to items content (RLS). Only
+          // writes when unknown or off by more than a second (e.g. the video
+          // URL was swapped for a different-length one), so a normal preview
+          // doesn't hammer the DB on every open.
+          onReady: (e) => {
+            let dur = null;
+            try {
+              dur = e.target.getDuration();
+            } catch {
+              /* no-op */
+            }
+            if (typeof dur !== "number" || !(dur > 0)) return;
+            const known = it.duration_seconds;
+            if (known != null && Math.abs(known - dur) <= 1) return;
+            supabase
+              .from("items")
+              .update({ duration_seconds: dur })
+              .eq("id", it.id)
+              .then(() => {
+                setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, duration_seconds: dur } : x)));
+              });
+          },
+        },
       });
       playerRef.current = player;
 

@@ -17,9 +17,12 @@ function makeItem(type) {
       ...base,
       title: "New video",
       video_url: "",
+      duration_seconds: null, // @feature: time-based-progress-v1
+      urlTouched: false,
       drill_text: "Now complete problems __ through __ in the workbook.",
     };
-  if (type === "project_video") return { ...base, title: "New project video", video_url: "" };
+  if (type === "project_video")
+    return { ...base, title: "New project video", video_url: "", duration_seconds: null, urlTouched: false };
   return {
     ...base,
     title: "New knowledge check",
@@ -89,6 +92,8 @@ export default function BootcampBuilder({ id }) {
         time_limit_minutes: it.time_limit_minutes ?? 30,
         video_url: it.video_url || "",
         drill_text: it.drill_text || "",
+        duration_seconds: it.duration_seconds ?? null, // @feature: time-based-progress-v1
+        urlTouched: false, // @feature: time-based-progress-v1 — grandfathers in existing videos; only edits/new items get checked
         solutions: sols
           .filter((s) => s.item_id === it.id)
           .map((s) => ({ id: s.id, title: s.title, url: s.url })),
@@ -153,6 +158,41 @@ export default function BootcampBuilder({ id }) {
   }
 
   async function save() {
+    // @feature: time-based-progress-v1
+    // Block the save ("publish") entirely if any video/project item has a URL
+    // but no captured duration — either it's brand new, or its URL was just
+    // edited (which clears duration_seconds locally, see the video_url input
+    // above). This runs before any network call, so nothing partial gets saved.
+    const missingDuration = items.filter(
+      (it) =>
+        (it.type === "video" || it.type === "project_video") &&
+        it.video_url &&
+        !it.duration_seconds &&
+        it.urlTouched
+    );
+    if (missingDuration.length) {
+      setMsg("");
+      setError(
+        <>
+          <strong>
+            Can&rsquo;t save — {missingDuration.length} video{missingDuration.length === 1 ? "" : "s"} missing
+            length data.
+          </strong>
+          <div style={{ marginTop: 6 }}>
+            I know this is a tedious step, but since these are YouTube recordings, the only way to learn a
+            video&rsquo;s length is to open it once. Go into <strong>Preview</strong> and let each of these load
+            for a few seconds, then come back and save again:
+          </div>
+          <ul style={{ margin: "8px 0 0 18px" }}>
+            {missingDuration.map((it) => (
+              <li key={it.id}>{it.title || "(untitled)"}</li>
+            ))}
+          </ul>
+        </>
+      );
+      return;
+    }
+
     setSaving(true);
     setError("");
     setMsg("");
@@ -341,7 +381,7 @@ export default function BootcampBuilder({ id }) {
                 <input
                   className="input subfield"
                   value={it.video_url}
-                  onChange={(e) => updItem(i, { video_url: e.target.value })}
+                  onChange={(e) => updItem(i, { video_url: e.target.value, duration_seconds: null, urlTouched: true })}
                   placeholder="Paste unlisted YouTube link"
                 />
               )}

@@ -8,6 +8,7 @@ const COLUMNS = [
   { k: "bootcamp", label: "Bootcamp" },
   { k: "cohort", label: "Cohort" },
   { k: "pct", label: "Progress" },
+  { k: "timePct", label: "Time %", filterable: false }, // @feature: time-based-progress-v1
   { k: "deadline", label: "Deadline" },
 ];
 
@@ -28,11 +29,12 @@ export default function AdminDashboardPage() {
 
   async function load() {
     setErr("");
-    const [enrRes, progRes] = await Promise.all([
+    const [enrRes, progRes, timeProgRes] = await Promise.all([
       supabase
         .from("enrollments")
         .select("id, user_id, bootcamp_id, cohort_id, deadline, profiles!user_id(full_name,email), bootcamps(name), cohorts(name)"),
       supabase.from("enrollment_progress").select("enrollment_id, pct"),
+      supabase.from("enrollment_time_progress").select("enrollment_id, time_pct"), // @feature: time-based-progress-v1
     ]);
 
     if (enrRes.error) {
@@ -44,6 +46,11 @@ export default function AdminDashboardPage() {
     const enr = enrRes.data || [];
     const prog = progRes.data || [];
     const pmap = Object.fromEntries(prog.map((p) => [p.enrollment_id, p.pct]));
+    const timeProg = timeProgRes.data || [];
+    // time_pct is null when nothing in the bootcamp has a known time budget yet
+    // (e.g. no video durations captured, no timed knowledge checks) — kept as
+    // null rather than 0 so the UI can show "—" instead of a misleading 0%.
+    const tpmap = Object.fromEntries(timeProg.map((p) => [p.enrollment_id, p.time_pct]));
 
     const built = enr.map((e) => ({
       id: e.id,
@@ -52,6 +59,7 @@ export default function AdminDashboardPage() {
       bootcamp: e.bootcamps?.name || "—",
       cohort: e.cohorts?.name || "—",
       pct: Math.round(pmap[e.id] ?? 0),
+      timePct: tpmap[e.id] == null ? null : Math.round(tpmap[e.id]), // @feature: time-based-progress-v1
       deadline: e.deadline,
     }));
 
@@ -118,6 +126,13 @@ export default function AdminDashboardPage() {
     const dir = sortDir === "asc" ? 1 : -1;
     rows.sort((a, b) => {
       if (sortKey === "pct") return (a.pct - b.pct) * dir;
+      if (sortKey === "timePct") {
+        // nulls (no time budget known yet) sort last regardless of direction
+        if (a.timePct == null && b.timePct == null) return 0;
+        if (a.timePct == null) return 1;
+        if (b.timePct == null) return -1;
+        return (a.timePct - b.timePct) * dir;
+      }
       if (sortKey === "deadline") {
         const av = a.deadline || "";
         const bv = b.deadline || "";
@@ -159,10 +174,10 @@ export default function AdminDashboardPage() {
   }
 
   function exportCsv() {
-    const head = ["Name", "Email", "Bootcamp", "Cohort", "Progress %", "Deadline"];
+    const head = ["Name", "Email", "Bootcamp", "Cohort", "Progress %", "Time %", "Deadline"];
     const lines = [head.join(",")];
     sorted.forEach((r) => {
-      const cells = [r.name, r.email, r.bootcamp, r.cohort, r.pct, r.deadline || ""];
+      const cells = [r.name, r.email, r.bootcamp, r.cohort, r.pct, r.timePct ?? "", r.deadline || ""];
       lines.push(cells.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","));
     });
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
@@ -178,7 +193,7 @@ export default function AdminDashboardPage() {
   }
 
   function sortLabels(key) {
-    if (key === "pct") return ["Lowest first", "Highest first"];
+    if (key === "pct" || key === "timePct") return ["Lowest first", "Highest first"];
     if (key === "deadline") return ["Earliest first", "Latest first"];
     return ["A → Z", "Z → A"];
   }
@@ -259,6 +274,7 @@ export default function AdminDashboardPage() {
 
   function ColumnMenu({ col }) {
     const [asc, desc] = sortLabels(col.k);
+    const showFilter = col.filterable !== false;
     return (
       <div className="col-menu" onClick={(e) => e.stopPropagation()}>
         <div className="menu-sec">
@@ -278,10 +294,12 @@ export default function AdminDashboardPage() {
             {desc}
           </button>
         </div>
-        <div className="menu-sec">
-          <div className="menu-lbl">Filter</div>
-          {renderFilter(col.k)}
-        </div>
+        {showFilter ? (
+          <div className="menu-sec">
+            <div className="menu-lbl">Filter</div>
+            {renderFilter(col.k)}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -378,6 +396,7 @@ export default function AdminDashboardPage() {
                         <span className="prog-pct">{r.pct}%</span>
                       </div>
                     </td>
+                    <td className="note">{r.timePct == null ? "—" : `${r.timePct}%`}</td>
                     <td className="dt-deadline">{fmtDeadline(r.deadline)}</td>
                   </tr>
                 ))
