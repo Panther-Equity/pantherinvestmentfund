@@ -23,6 +23,8 @@ function makeItem(type) {
   return {
     ...base,
     title: "New knowledge check",
+    timed: false,
+    time_limit_minutes: 30,
     questions: [
       { id: crypto.randomUUID(), prompt: "", options: ["", "", "", ""], answer_index: 0 },
     ],
@@ -83,6 +85,8 @@ export default function BootcampBuilder({ id }) {
         id: it.id,
         type: it.type,
         title: it.title,
+        timed: it.timed ?? false,
+        time_limit_minutes: it.time_limit_minutes ?? 30,
         video_url: it.video_url || "",
         drill_text: it.drill_text || "",
         solutions: sols
@@ -176,6 +180,9 @@ export default function BootcampBuilder({ id }) {
         weight: it.type === "project_video" ? 2 : 1,
         video_url: it.type === "knowledge_check" ? null : it.video_url || null,
         drill_text: it.type === "video" ? it.drill_text || null : null,
+        timed: it.type === "knowledge_check" ? !!it.timed : false,
+        time_limit_minutes:
+          it.type === "knowledge_check" ? Number(it.time_limit_minutes) || 30 : 30,
       }));
       if (itemRows.length) {
         const { error: e2 } = await supabase.from("items").upsert(itemRows);
@@ -400,6 +407,43 @@ export default function BootcampBuilder({ id }) {
 
               {it.type === "knowledge_check" && (
                 <div className="qeditor">
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      marginBottom: 12,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={!!it.timed}
+                        onChange={(e) => updItem(i, { timed: e.target.checked })}
+                      />
+                      Timed check
+                    </label>
+                    {it.timed && (
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13 }}>
+                        <input
+                          className="input"
+                          type="number"
+                          min={1}
+                          max={180}
+                          value={it.time_limit_minutes}
+                          onChange={(e) => updItem(i, { time_limit_minutes: e.target.value })}
+                          style={{ width: 72 }}
+                        />
+                        minute limit
+                      </span>
+                    )}
+                    <span className="note">
+                      {it.timed
+                        ? "Students get a Start button, then a countdown that auto-submits at zero."
+                        : "Untimed — students take it freely."}
+                    </span>
+                  </div>
                   {(it.questions || []).map((q, qi) => (
                     <div className="qcard" key={q.id || qi}>
                       <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>

@@ -9,11 +9,12 @@ export default function BootcampsPage() {
   const router = useRouter();
   const [bootcamps, setBootcamps] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [sort, setSort] = useState("name_asc");
 
   async function load() {
     const { data } = await supabase
       .from("bootcamps")
-      .select("id, name, audience, items(type)")
+      .select("id, name, audience, updated_at, items(type)")
       .order("created_at", { ascending: true });
     setBootcamps(data || []);
   }
@@ -28,6 +29,19 @@ export default function BootcampsPage() {
     const k = items.filter((i) => i.type === "knowledge_check").length;
     const p = items.some((i) => i.type === "project_video");
     return `${v} video${v === 1 ? "" : "s"} · ${k} check${k === 1 ? "" : "s"} · ${p ? "project" : "no project"}`;
+  }
+
+  function fmtWhen(t) {
+    if (!t) return "";
+    const d = new Date(t);
+    if (isNaN(d)) return "";
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
   }
 
   async function remove(id, name) {
@@ -107,6 +121,15 @@ export default function BootcampsPage() {
 
   if (bootcamps === null) return <div className="stub">Loading bootcamps…</div>;
 
+  const sorted = [...bootcamps].sort((a, b) => {
+    if (sort === "name_asc") return a.name.localeCompare(b.name);
+    if (sort === "name_desc") return b.name.localeCompare(a.name);
+    const at = a.updated_at || "";
+    const bt = b.updated_at || "";
+    if (sort === "modified_asc") return at < bt ? -1 : at > bt ? 1 : 0;
+    return at < bt ? 1 : at > bt ? -1 : 0; // modified_desc
+  });
+
   return (
     <>
       <div
@@ -115,15 +138,35 @@ export default function BootcampsPage() {
           justifyContent: "space-between",
           alignItems: "center",
           marginBottom: 18,
+          gap: 12,
+          flexWrap: "wrap",
         }}
       >
         <div>
           <div className="eyebrow">Content</div>
           <h1 className="h1">Bootcamps</h1>
         </div>
-        <button className="btn pri" onClick={() => router.push("/admin/bootcamps/new")}>
-          + New bootcamp
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {bootcamps.length > 1 && (
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span className="note">Sort</span>
+              <select
+                className="input"
+                value={sort}
+                onChange={(e) => setSort(e.target.value)}
+                style={{ width: "auto", paddingTop: 6, paddingBottom: 6 }}
+              >
+                <option value="name_asc">Name A–Z</option>
+                <option value="name_desc">Name Z–A</option>
+                <option value="modified_desc">Recently modified</option>
+                <option value="modified_asc">Oldest modified</option>
+              </select>
+            </label>
+          )}
+          <button className="btn pri" onClick={() => router.push("/admin/bootcamps/new")}>
+            + New bootcamp
+          </button>
+        </div>
       </div>
 
       {bootcamps.length === 0 ? (
@@ -133,11 +176,14 @@ export default function BootcampsPage() {
         </div>
       ) : (
         <div className="grid cards">
-          {bootcamps.map((b) => (
+          {sorted.map((b) => (
             <div className="card" key={b.id}>
               {b.audience ? <span className="badge b-aud">{b.audience}</span> : null}
               <h3 style={{ margin: "12px 0 3px" }}>{b.name}</h3>
               <div className="note">{summary(b.items || [])}</div>
+              {b.updated_at ? (
+                <div className="note" style={{ marginTop: 2 }}>Updated {fmtWhen(b.updated_at)}</div>
+              ) : null}
               <div className="hr" />
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button className="btn ghost sm" onClick={() => router.push(`/admin/bootcamps/${b.id}`)}>
