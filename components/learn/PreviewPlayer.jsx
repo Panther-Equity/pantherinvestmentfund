@@ -1,17 +1,26 @@
 "use client";
-
+// @feature: no-skip-forward-v1
 // Admin-only "Preview as student" player.
 // Renders a bootcamp with the exact same UI students see, but:
 //   - no enrollment is required (staff can preview any bootcamp)
-//   - NOTHING is written to the database — completion checks and quiz
-//     submissions live in local component state only, so previewing never
-//     touches real progress/score records.
+//   - NOTHING is written to the database — completion checks, quiz
+//     submissions, AND furthest-watched video position are all local-only
+//     component state, so previewing never touches real progress/score
+//     records or public.video_progress.
+//
+// Mirrors LearnPlayer's no-skip-forward video control (YouTube IFrame Player
+// API, forward-seek snapped back to the furthest point reached, backward
+// seeks always free) but furthest-watched resets on reload since it's kept
+// in local state only.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 
-function ytEmbed(url) {
+const SKIP_TOLERANCE_SECONDS = 2; // absorbs polling jitter, not a real allowance to skip ahead
+const POLL_MS = 500;
+
+function ytVideoId(url) {
   if (!url) return null;
   try {
     const u = new URL(url);
@@ -20,10 +29,32 @@ function ytEmbed(url) {
     else if (u.pathname.startsWith("/embed/")) id = u.pathname.split("/embed/")[1];
     else id = u.searchParams.get("v") || "";
     id = (id || "").split(/[?&/]/)[0];
-    return id ? `https://www.youtube.com/embed/${id}` : null;
+    return id || null;
   } catch {
     return null;
   }
+}
+
+// Loads the YouTube IFrame API script once (idempotent — safe if called
+// multiple times, e.g. across item switches) and resolves with window.YT.
+let ytApiPromise = null;
+function loadYouTubeIframeApi() {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if (window.YT && window.YT.Player) return Promise.resolve(window.YT);
+  if (ytApiPromise) return ytApiPromise;
+  ytApiPromise = new Promise((resolve) => {
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof prev === "function") prev();
+      resolve(window.YT);
+    };
+    if (!document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(tag);
+    }
+  });
+  return ytApiPromise;
 }
 
 // pipe-delimited stem lines -> real table; other lines -> paragraphs
@@ -88,9 +119,11 @@ export default function PreviewPlayer({ bootcampId }) {
   const [submitted, setSubmitted] = useState({}); // local only
   const [current, setCurrent] = useState(0);
   const [previewStarts, setPreviewStarts] = useState({}); // item_id -> start ts (local, no DB)
+  const [videoProgress, setVideoProgress] = useState({}); // item_id -> furthest_seconds (local only)
   const [nowTs, setNowTs] = useState(Date.now());
   const answersRef = useRef(answers);
   answersRef.current = answers;
+  const playerRef = useRef(null); // current YT.Player instance, for debugging/inspection only
 
   const load = useCallback(async () => {
     const { data: b } = await supabase
@@ -166,6 +199,70 @@ export default function PreviewPlayer({ bootcampId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, items, previewStarts, submitted]);
 
+  // No-skip-forward video control (preview): identical mechanics to LearnPlayer,
+  // but furthest-watched lives in local state only — no DB reads/writes, resets
+  // on reload. Confirms preview never touches public.video_progress.
+  useEffect(() => {
+    const it = items[current];
+    if (!it || (it.type !== "video" && it.type !== "project_video")) return;
+    const videoId = ytVideoId(it.video_url);
+    if (!videoId) return;
+
+    let destroyed = false;
+    let player = null;
+    let pollIv = null;
+    let furthest = videoProgress[it.id] || 0;
+    const hostId = `yt-${it.id}`;
+
+    loadYouTubeIframeApi().then((YT) => {
+      if (destroyed) return;
+      const hostEl = document.getElementById(hostId);
+      if (!hostEl) return;
+      player = new YT.Player(hostId, {
+        videoId,
+        width: "100%",
+        height: "100%",
+        playerVars: { rel: 0, modestbranding: 1 },
+      });
+      playerRef.current = player;
+
+      pollIv = setInterval(() => {
+        if (!player || typeof player.getCurrentTime !== "function") return;
+        let t;
+        try {
+          t = player.getCurrentTime();
+        } catch {
+          return;
+        }
+        if (typeof t !== "number" || Number.isNaN(t)) return;
+        if (t > furthest + SKIP_TOLERANCE_SECONDS) {
+          try {
+            player.seekTo(furthest, true);
+          } catch {
+            /* no-op */
+          }
+        } else if (t > furthest) {
+          furthest = t;
+        }
+      }, POLL_MS);
+    });
+
+    return () => {
+      destroyed = true;
+      if (pollIv) clearInterval(pollIv);
+      setVideoProgress((prev) => ({ ...prev, [it.id]: Math.max(prev[it.id] || 0, furthest) }));
+      if (player && typeof player.destroy === "function") {
+        try {
+          player.destroy();
+        } catch {
+          /* no-op */
+        }
+      }
+      playerRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, items]);
+
   const totalW = items.reduce((s, it) => s + (it.weight || 1), 0);
   const doneW = items.filter((it) => completed.has(it.id)).reduce((s, it) => s + (it.weight || 1), 0);
   const pct = totalW ? Math.round((100 * doneW) / totalW) : 0;
@@ -233,7 +330,7 @@ export default function PreviewPlayer({ bootcampId }) {
 
   function renderItem(it) {
     const done = completed.has(it.id);
-    const embed = ytEmbed(it.video_url);
+    const videoId = ytVideoId(it.video_url);
     const res = submitted[it.id];
     const start = previewStarts[it.id];
     const notStartedTimed = it.type === "knowledge_check" && it.timed && !start && !res;
@@ -250,14 +347,9 @@ export default function PreviewPlayer({ bootcampId }) {
 
         {(it.type === "video" || it.type === "project_video") && (
           <>
-            {embed ? (
-              <div className="embed">
-                <iframe
-                  src={embed}
-                  title={it.title}
-                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                  allowFullScreen
-                />
+            {videoId ? (
+              <div className="embed" key={`yt-wrap-${it.id}`}>
+                <div id={`yt-${it.id}`} className="yt-host" />
               </div>
             ) : (
               <div className="embed-ph">

@@ -1,10 +1,22 @@
 "use client";
+// @feature: no-skip-forward-v1
+// Rewind-allowed, no-skip-forward video control: the plain <iframe> embed is
+// replaced with the YouTube IFrame Player API so we can track the furthest
+// point a student has watched and snap any forward-seek back to it. Backward
+// seeks are always free. This is a deterrent for casual skipping, not a hard
+// lock — the unlisted YouTube URL is still directly reachable outside the app.
+// Furthest-watched is persisted to public.video_progress (enrollment_id, item_id).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 
-function ytEmbed(url) {
+const SKIP_TOLERANCE_SECONDS = 2; // absorbs polling jitter, not a real allowance to skip ahead
+const POLL_MS = 500;
+const SAVE_INTERVAL_MS = 10000;
+const MIN_DELTA_TO_SAVE = 2; // don't write to the DB for sub-2s progress ticks
+
+function ytVideoId(url) {
   if (!url) return null;
   try {
     const u = new URL(url);
@@ -13,10 +25,32 @@ function ytEmbed(url) {
     else if (u.pathname.startsWith("/embed/")) id = u.pathname.split("/embed/")[1];
     else id = u.searchParams.get("v") || "";
     id = (id || "").split(/[?&/]/)[0];
-    return id ? `https://www.youtube.com/embed/${id}` : null;
+    return id || null;
   } catch {
     return null;
   }
+}
+
+// Loads the YouTube IFrame API script once (idempotent — safe if called
+// multiple times, e.g. across item switches) and resolves with window.YT.
+let ytApiPromise = null;
+function loadYouTubeIframeApi() {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if (window.YT && window.YT.Player) return Promise.resolve(window.YT);
+  if (ytApiPromise) return ytApiPromise;
+  ytApiPromise = new Promise((resolve) => {
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      if (typeof prev === "function") prev();
+      resolve(window.YT);
+    };
+    if (!document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(tag);
+    }
+  });
+  return ytApiPromise;
 }
 
 // pipe-delimited stem lines -> real table; other lines -> paragraphs
@@ -82,9 +116,11 @@ export default function LearnPlayer({ bootcampId }) {
   const [submitted, setSubmitted] = useState({});
   const [current, setCurrent] = useState(0);
   const [attempts, setAttempts] = useState({}); // item_id -> { started_at, submitted_at }
+  const [videoProgress, setVideoProgress] = useState({}); // item_id -> furthest_seconds watched
   const [nowTs, setNowTs] = useState(Date.now());
   const answersRef = useRef(answers);
   answersRef.current = answers;
+  const playerRef = useRef(null); // current YT.Player instance, for debugging/inspection only
 
   const load = useCallback(async () => {
     const {
@@ -136,10 +172,11 @@ export default function LearnPlayer({ bootcampId }) {
     }));
     setItems(built);
 
-    const [{ data: comp }, { data: sc }, { data: att }] = await Promise.all([
+    const [{ data: comp }, { data: sc }, { data: att }, { data: vp }] = await Promise.all([
       supabase.from("completions").select("item_id").eq("enrollment_id", enrRow.id),
       supabase.from("quiz_scores").select("item_id, score, total").eq("enrollment_id", enrRow.id),
       supabase.from("quiz_attempts").select("item_id, started_at, submitted_at").eq("enrollment_id", enrRow.id),
+      supabase.from("video_progress").select("item_id, furthest_seconds").eq("enrollment_id", enrRow.id),
     ]);
     const compSet = new Set((comp || []).map((c) => c.item_id));
     setCompleted(compSet);
@@ -147,6 +184,7 @@ export default function LearnPlayer({ bootcampId }) {
     setAttempts(
       Object.fromEntries((att || []).map((a) => [a.item_id, { started_at: a.started_at, submitted_at: a.submitted_at }]))
     );
+    setVideoProgress(Object.fromEntries((vp || []).map((r) => [r.item_id, Number(r.furthest_seconds) || 0])));
 
     const firstIncomplete = built.findIndex((it) => !compSet.has(it.id));
     setCurrent(firstIncomplete === -1 ? 0 : firstIncomplete);
@@ -187,6 +225,97 @@ export default function LearnPlayer({ bootcampId }) {
     return () => clearInterval(iv);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, items, attempts, submitted]);
+
+  // No-skip-forward video control: create/tear down a YT.Player for whichever
+  // item is currently active. Polls playback position; any forward jump past
+  // the furthest point ever reached gets snapped back. Backward seeks are
+  // always allowed. Furthest-watched is persisted (throttled) to video_progress.
+  useEffect(() => {
+    const it = items[current];
+    if (!it || (it.type !== "video" && it.type !== "project_video") || !enr) return;
+    const videoId = ytVideoId(it.video_url);
+    if (!videoId) return;
+
+    let destroyed = false;
+    let player = null;
+    let pollIv = null;
+    let saveIv = null;
+    let furthest = videoProgress[it.id] || 0;
+    let lastSaved = furthest;
+    const hostId = `yt-${it.id}`;
+
+    const persist = async (seconds) => {
+      if (!enr) return;
+      try {
+        await supabase.from("video_progress").upsert(
+          { enrollment_id: enr.id, item_id: it.id, furthest_seconds: seconds, updated_at: new Date().toISOString() },
+          { onConflict: "enrollment_id,item_id" }
+        );
+      } catch {
+        // best-effort; a failed save just means a slightly larger delta gets retried next tick
+      }
+    };
+
+    loadYouTubeIframeApi().then((YT) => {
+      if (destroyed) return;
+      const hostEl = document.getElementById(hostId);
+      if (!hostEl) return;
+      player = new YT.Player(hostId, {
+        videoId,
+        width: "100%",
+        height: "100%",
+        playerVars: { rel: 0, modestbranding: 1 },
+      });
+      playerRef.current = player;
+
+      pollIv = setInterval(() => {
+        if (!player || typeof player.getCurrentTime !== "function") return;
+        let t;
+        try {
+          t = player.getCurrentTime();
+        } catch {
+          return;
+        }
+        if (typeof t !== "number" || Number.isNaN(t)) return;
+        if (t > furthest + SKIP_TOLERANCE_SECONDS) {
+          try {
+            player.seekTo(furthest, true);
+          } catch {
+            /* no-op */
+          }
+        } else if (t > furthest) {
+          furthest = t;
+        }
+      }, POLL_MS);
+
+      saveIv = setInterval(() => {
+        if (furthest - lastSaved >= MIN_DELTA_TO_SAVE) {
+          lastSaved = furthest;
+          persist(furthest);
+        }
+      }, SAVE_INTERVAL_MS);
+    });
+
+    return () => {
+      destroyed = true;
+      if (pollIv) clearInterval(pollIv);
+      if (saveIv) clearInterval(saveIv);
+      if (furthest - lastSaved >= 1) {
+        lastSaved = furthest;
+        persist(furthest);
+      }
+      setVideoProgress((prev) => ({ ...prev, [it.id]: Math.max(prev[it.id] || 0, furthest) }));
+      if (player && typeof player.destroy === "function") {
+        try {
+          player.destroy();
+        } catch {
+          /* no-op */
+        }
+      }
+      playerRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, items, enr]);
 
   const totalW = items.reduce((s, it) => s + (it.weight || 1), 0);
   const doneW = items.filter((it) => completed.has(it.id)).reduce((s, it) => s + (it.weight || 1), 0);
@@ -299,7 +428,7 @@ export default function LearnPlayer({ bootcampId }) {
 
   function renderItem(it) {
     const done = completed.has(it.id);
-    const embed = ytEmbed(it.video_url);
+    const videoId = ytVideoId(it.video_url);
     const res = submitted[it.id];
     const att = attempts[it.id];
     const notStartedTimed = it.type === "knowledge_check" && it.timed && !att && !res;
@@ -316,14 +445,9 @@ export default function LearnPlayer({ bootcampId }) {
 
         {(it.type === "video" || it.type === "project_video") && (
           <>
-            {embed ? (
-              <div className="embed">
-                <iframe
-                  src={embed}
-                  title={it.title}
-                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                  allowFullScreen
-                />
+            {videoId ? (
+              <div className="embed" key={`yt-wrap-${it.id}`}>
+                <div id={`yt-${it.id}`} className="yt-host" />
               </div>
             ) : (
               <div className="embed-ph">
