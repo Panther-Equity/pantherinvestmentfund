@@ -17,7 +17,13 @@ export default function ConfirmInviteClient({ token_hash, type, next }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token_hash, type }),
       });
-      const data = await res.json();
+      const raw = await res.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(`Server returned non-JSON (status ${res.status}): ${raw.slice(0, 300)}`);
+      }
       if (!res.ok) throw new Error(data.error || "This link is invalid or has expired.");
       router.push(next);
     } catch (e) {
