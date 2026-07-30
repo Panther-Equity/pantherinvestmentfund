@@ -31,6 +31,11 @@ export default function PeoplePage() {
   const [roleBusyId, setRoleBusyId] = useState(null);
   const [removeBusyId, setRemoveBusyId] = useState(null);
 
+  const [transferTargetId, setTransferTargetId] = useState("");
+  const [transferConfirmText, setTransferConfirmText] = useState("");
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
+
   const [sortKey, setSortKey] = useState("role");
   const [sortDir, setSortDir] = useState("asc");
   const [openCol, setOpenCol] = useState(null);
@@ -66,6 +71,11 @@ export default function PeoplePage() {
   }, []);
 
   const isOwner = me?.role === "owner";
+
+  const transferTargets = useMemo(
+    () => people.filter((p) => p.role === "admin" && p.status === "active"),
+    [people]
+  );
 
   async function createInvite(e) {
     e.preventDefault();
@@ -151,6 +161,32 @@ export default function PeoplePage() {
       setErr(e2.message);
     } finally {
       setRemoveBusyId(null);
+    }
+  }
+
+  async function transferOwnership() {
+    const target = transferTargets.find((p) => p.id === transferTargetId);
+    if (!target) return;
+    setErr("");
+    setMsg("");
+    setTransferBusy(true);
+    try {
+      const res = await fetch("/api/transfer-ownership", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newOwnerId: target.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not transfer ownership.");
+      await Promise.all([loadMe(), loadPeople()]);
+      setTransferOpen(false);
+      setTransferTargetId("");
+      setTransferConfirmText("");
+      setMsg(`Ownership transferred to ${data.email || target.email}. You are now an admin.`);
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setTransferBusy(false);
     }
   }
 
@@ -467,6 +503,74 @@ export default function PeoplePage() {
           </div>
         </>
       )}
+
+      {isOwner && !loading && (() => {
+        const target = transferTargets.find((p) => p.id === transferTargetId) || null;
+        const requiredPhrase = target ? `TRANSFER OWNERSHIP TO ${target.email}` : "";
+        const canConfirm = !!target && transferConfirmText.trim() === requiredPhrase && !transferBusy;
+        return (
+          <div className="card" style={{ maxWidth: 720, marginTop: 28, borderColor: "var(--danger, #dc2626)" }}>
+            <div className="picklabel" style={{ marginBottom: 8 }}>
+              <span style={{ color: "var(--danger, #dc2626)" }}>Danger zone — transfer ownership</span>
+            </div>
+            <div className="note" style={{ marginBottom: 14 }}>
+              Hand the single owner role to another admin. You become an admin and lose owner-only powers
+              (changing roles, removing admins, this transfer). Meant to be done once, at handoff — you
+              can&rsquo;t undo it afterward.
+            </div>
+            {transferTargets.length === 0 ? (
+              <div className="note">
+                No eligible admins yet. The new owner must already be an <strong>active admin</strong> first.
+              </div>
+            ) : !transferOpen ? (
+              <button className="btn danger" type="button" onClick={() => setTransferOpen(true)}>
+                Transfer ownership…
+              </button>
+            ) : (
+              <div style={{ display: "grid", gap: 12 }}>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label>New owner (active admins only)</label>
+                  <select
+                    className="input"
+                    value={transferTargetId}
+                    onChange={(e) => { setTransferTargetId(e.target.value); setTransferConfirmText(""); }}
+                  >
+                    <option value="">Select an admin…</option>
+                    {transferTargets.map((p) => (
+                      <option key={p.id} value={p.id}>{(p.full_name || p.email)} — {p.email}</option>
+                    ))}
+                  </select>
+                </div>
+                {target && (
+                  <div className="field" style={{ marginBottom: 0 }}>
+                    <label>Type <code>{requiredPhrase}</code> to confirm</label>
+                    <input
+                      className="input mono-input"
+                      value={transferConfirmText}
+                      onChange={(e) => setTransferConfirmText(e.target.value)}
+                      placeholder={requiredPhrase}
+                      autoComplete="off"
+                    />
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="btn danger" type="button" disabled={!canConfirm} onClick={transferOwnership}>
+                    {transferBusy ? "Transferring…" : "Confirm transfer"}
+                  </button>
+                  <button
+                    className="btn link"
+                    type="button"
+                    disabled={transferBusy}
+                    onClick={() => { setTransferOpen(false); setTransferTargetId(""); setTransferConfirmText(""); }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {!isOwner && !loading && (
         <div className="note" style={{ marginTop: 12 }}>
