@@ -3,6 +3,39 @@
 import { useEffect, useState } from "react";
 import { createClient } from "@/utils/supabase/client";
 
+/* Small segmented filter control — inline styles only, no globals.css change. */
+function Seg({ options, value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+      {options.map((o) => {
+        const on = value === o.key;
+        return (
+          <button
+            key={o.key}
+            type="button"
+            onClick={() => onChange(o.key)}
+            style={{
+              border: "1px solid " + (on ? "var(--indigo)" : "var(--line-d)"),
+              background: on ? "var(--indigo-t)" : "var(--surface)",
+              color: on ? "var(--indigo)" : "var(--gray)",
+              fontWeight: on ? 600 : 500,
+              fontFamily: "var(--font-mono), monospace",
+              fontSize: 11,
+              letterSpacing: ".02em",
+              padding: "5px 10px",
+              borderRadius: "var(--r-sm)",
+              cursor: "pointer",
+              lineHeight: 1.2,
+            }}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function AssignPage() {
   const supabase = createClient();
 
@@ -15,6 +48,10 @@ export default function AssignPage() {
   const [cohortId, setCohortId] = useState("");
   const [deadline, setDeadline] = useState("");
   const [newCohort, setNewCohort] = useState("");
+
+  // v3: pick-list filters
+  const [pFilter, setPFilter] = useState("all"); // all | student | staff
+  const [bFilter, setBFilter] = useState("all"); // all | <audience value>
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -44,10 +81,6 @@ export default function AssignPage() {
     if (n.has(id)) n.delete(id);
     else n.add(id);
     setter(n);
-  }
-
-  function selectAll(list, setter) {
-    setter(new Set(list.map((x) => x.id)));
   }
 
   async function addCohort() {
@@ -121,6 +154,39 @@ export default function AssignPage() {
 
   const cohortName = cohortId ? cohorts.find((c) => String(c.id) === String(cohortId))?.name : null;
 
+  // v3: derived filtered lists + filter option sets
+  const filteredPeople = people.filter((p) =>
+    pFilter === "all" ? true : pFilter === "student" ? p.role === "student" : p.role !== "student"
+  );
+  const audOpts = Array.from(new Set(bootcamps.map((b) => b.audience).filter(Boolean)));
+  const filteredBc = bootcamps.filter((b) => (bFilter === "all" ? true : b.audience === bFilter));
+
+  const peopleFilterOpts = [
+    { key: "all", label: "All" },
+    { key: "student", label: "Students" },
+    { key: "staff", label: "Admins" },
+  ];
+  const bcFilterOpts = [
+    { key: "all", label: "All" },
+    ...audOpts.map((a) => ({ key: a, label: a.charAt(0).toUpperCase() + a.slice(1) })),
+  ];
+
+  // v3: "Select all" is scoped to the currently-filtered rows, and toggles
+  const allFilteredPeopleSel = filteredPeople.length > 0 && filteredPeople.every((p) => selPeople.has(p.id));
+  function toggleAllPeople() {
+    const n = new Set(selPeople);
+    if (allFilteredPeopleSel) filteredPeople.forEach((p) => n.delete(p.id));
+    else filteredPeople.forEach((p) => n.add(p.id));
+    setSelPeople(n);
+  }
+  const allFilteredBcSel = filteredBc.length > 0 && filteredBc.every((b) => selBc.has(b.id));
+  function toggleAllBc() {
+    const n = new Set(selBc);
+    if (allFilteredBcSel) filteredBc.forEach((b) => n.delete(b.id));
+    else filteredBc.forEach((b) => n.add(b.id));
+    setSelBc(n);
+  }
+
   return (
     <>
       <div className="eyebrow">Assign</div>
@@ -138,13 +204,22 @@ export default function AssignPage() {
             <div className="card">
               <div className="picklabel">
                 <span>People</span>
-                <button className="btn link sm" onClick={() => selectAll(people, setSelPeople)}>Select all</button>
+                <button className="btn link sm" onClick={toggleAllPeople}>
+                  {allFilteredPeopleSel ? "Clear" : "Select all"}
+                </button>
               </div>
+              {people.length > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  <Seg options={peopleFilterOpts} value={pFilter} onChange={setPFilter} />
+                </div>
+              )}
               <div className="picklist">
                 {people.length === 0 ? (
                   <div className="note" style={{ padding: 12 }}>No people yet. They&rsquo;ll appear here once they have accounts (invites come in the next update).</div>
+                ) : filteredPeople.length === 0 ? (
+                  <div className="note" style={{ padding: 12 }}>No people match this filter.</div>
                 ) : (
-                  people.map((p) => (
+                  filteredPeople.map((p) => (
                     <label className="pickrow" key={p.id}>
                       <input type="checkbox" checked={selPeople.has(p.id)} onChange={() => toggle(selPeople, setSelPeople, p.id)} />
                       <span className="pickmain">
@@ -162,13 +237,22 @@ export default function AssignPage() {
             <div className="card">
               <div className="picklabel">
                 <span>Bootcamps</span>
-                <button className="btn link sm" onClick={() => selectAll(bootcamps, setSelBc)}>Select all</button>
+                <button className="btn link sm" onClick={toggleAllBc}>
+                  {allFilteredBcSel ? "Clear" : "Select all"}
+                </button>
               </div>
+              {bcFilterOpts.length > 2 && (
+                <div style={{ marginBottom: 10 }}>
+                  <Seg options={bcFilterOpts} value={bFilter} onChange={setBFilter} />
+                </div>
+              )}
               <div className="picklist">
                 {bootcamps.length === 0 ? (
                   <div className="note" style={{ padding: 12 }}>No bootcamps yet. Build one under the Bootcamps tab.</div>
+                ) : filteredBc.length === 0 ? (
+                  <div className="note" style={{ padding: 12 }}>No bootcamps match this filter.</div>
                 ) : (
-                  bootcamps.map((b) => (
+                  filteredBc.map((b) => (
                     <label className="pickrow" key={b.id}>
                       <input type="checkbox" checked={selBc.has(b.id)} onChange={() => toggle(selBc, setSelBc, b.id)} />
                       <span className="pickmain">

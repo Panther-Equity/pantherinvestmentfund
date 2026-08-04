@@ -24,6 +24,15 @@ export default function LearnerDetailPage() {
   const [profile, setProfile] = useState(null);
   const [rows, setRows] = useState([]);
 
+  // v3: per-enrollment deadline edit + unassign
+  const [editId, setEditId] = useState(null);
+  const [editVal, setEditVal] = useState("");
+  const [savingId, setSavingId] = useState(null);
+  const [editErr, setEditErr] = useState("");
+  const [confirmId, setConfirmId] = useState(null);
+  const [acting, setActing] = useState(false);
+  const [unErr, setUnErr] = useState("");
+
   const load = useCallback(async () => {
     setLoading(true);
 
@@ -123,6 +132,69 @@ export default function LearnerDetailPage() {
     load();
   }, [load]);
 
+  // v3: deadline edit
+  function startEdit(eid, cur) {
+    setEditErr("");
+    setEditId(eid);
+    setEditVal(cur || "");
+  }
+  function cancelEdit() {
+    setEditId(null);
+    setEditVal("");
+    setEditErr("");
+  }
+  async function saveDeadline(eid, clear) {
+    setEditErr("");
+    setSavingId(eid);
+    const newVal = clear ? null : editVal || null;
+    // .select() + empty-check: an RLS block returns success with 0 rows, so verify a row actually changed.
+    const { data, error } = await supabase
+      .from("enrollments")
+      .update({ deadline: newVal })
+      .eq("id", eid)
+      .select("id");
+    setSavingId(null);
+    if (error) {
+      setEditErr(error.message);
+      return;
+    }
+    if (!data || data.length === 0) {
+      setEditErr("Update was blocked — no permission. The enrollments RLS migration may not have run yet.");
+      return;
+    }
+    setRows((prev) => prev.map((r) => (r.id === eid ? { ...r, deadline: newVal } : r)));
+    setEditId(null);
+    setEditVal("");
+  }
+
+  // v3: unassign (hard delete; children cascade)
+  function openConfirm(eid) {
+    setUnErr("");
+    setConfirmId(eid);
+  }
+  async function doUnassign() {
+    setUnErr("");
+    setActing(true);
+    const { data, error } = await supabase
+      .from("enrollments")
+      .delete()
+      .eq("id", confirmId)
+      .select("id");
+    setActing(false);
+    if (error) {
+      setUnErr(error.message);
+      return;
+    }
+    if (!data || data.length === 0) {
+      setUnErr("Removal was blocked — no permission. The enrollments RLS migration may not have run yet.");
+      return;
+    }
+    setRows((prev) => prev.filter((r) => r.id !== confirmId));
+    setConfirmId(null);
+  }
+
+  const confirmRow = rows.find((r) => r.id === confirmId);
+
   if (loading) return <div className="stub">Loading…</div>;
   if (notFound)
     return (
@@ -171,10 +243,41 @@ export default function LearnerDetailPage() {
                 <div>
                   {r.audience ? <span className="badge b-aud">{r.audience}</span> : null}
                   <h3 style={{ margin: "10px 0 3px" }}>{r.bootcampName}</h3>
-                  <div className="note">
-                    {r.cohortName ? `${r.cohortName} · ` : ""}
-                    {r.deadline ? `Due ${fmtDeadline(r.deadline)}` : "No deadline"}
+                  <div className="note" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span>
+                      {r.cohortName ? `${r.cohortName} · ` : ""}
+                      {r.deadline ? `Due ${fmtDeadline(r.deadline)}` : "No deadline"}
+                    </span>
+                    {editId === r.id ? (
+                      <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                        <input
+                          type="date"
+                          className="input"
+                          style={{ width: "auto", padding: "5px 8px", fontSize: 12 }}
+                          value={editVal}
+                          onChange={(e) => setEditVal(e.target.value)}
+                        />
+                        <button className="btn sm pri" onClick={() => saveDeadline(r.id, false)} disabled={savingId === r.id}>
+                          {savingId === r.id ? "…" : "Save"}
+                        </button>
+                        <button className="btn sm ghost" onClick={cancelEdit} disabled={savingId === r.id}>
+                          Cancel
+                        </button>
+                        {r.deadline && (
+                          <button className="btn sm link" onClick={() => saveDeadline(r.id, true)} disabled={savingId === r.id}>
+                            Clear
+                          </button>
+                        )}
+                      </span>
+                    ) : (
+                      <button className="btn link sm" style={{ padding: "2px 4px" }} onClick={() => startEdit(r.id, r.deadline)}>
+                        Edit deadline
+                      </button>
+                    )}
                   </div>
+                  {editId === r.id && editErr && (
+                    <div className="notice error" style={{ marginTop: 8, maxWidth: 420 }}>{editErr}</div>
+                  )}
                 </div>
                 <div style={{ textAlign: "right", minWidth: 120 }}>
                   <div
@@ -252,8 +355,74 @@ export default function LearnerDetailPage() {
                   ))
                 )}
               </div>
+
+              {/* v3: unassign */}
+              <div
+                style={{
+                  marginTop: 14,
+                  paddingTop: 12,
+                  borderTop: "1px solid var(--line)",
+                  display: "flex",
+                  justifyContent: "flex-end",
+                }}
+              >
+                <button className="btn ghost danger sm" onClick={() => openConfirm(r.id)}>
+                  Unassign
+                </button>
+              </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* v3: unassign confirm modal */}
+      {confirmId && confirmRow && (
+        <div
+          onClick={() => !acting && setConfirmId(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(20,20,45,.4)",
+            zIndex: 100,
+            display: "grid",
+            placeItems: "center",
+            padding: 20,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "var(--surface)",
+              border: "1px solid var(--line-d)",
+              borderRadius: "var(--r-lg)",
+              padding: 24,
+              maxWidth: 440,
+              width: "100%",
+              boxShadow: "0 20px 50px rgba(20,20,45,.25)",
+            }}
+          >
+            <h3 style={{ marginBottom: 8 }}>Remove assignment?</h3>
+            <p className="note" style={{ fontSize: 13, color: "var(--gray)", marginBottom: 6 }}>
+              This unassigns <strong>{confirmRow.bootcampName}</strong> from {profile.full_name || profile.email}.
+            </p>
+            <p className="note" style={{ fontSize: 13, color: "var(--danger)", marginBottom: 18 }}>
+              Their completions and quiz scores for this bootcamp will be permanently deleted. This can&rsquo;t be undone.
+            </p>
+            {unErr && <div className="notice error" style={{ marginBottom: 12 }}>{unErr}</div>}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button className="btn ghost" onClick={() => setConfirmId(null)} disabled={acting}>
+                Cancel
+              </button>
+              <button
+                className="btn"
+                style={{ background: "var(--danger)", color: "#fff" }}
+                onClick={doUnassign}
+                disabled={acting}
+              >
+                {acting ? "Removing…" : "Remove assignment"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </>
