@@ -176,21 +176,25 @@ export default function LearnPlayer({ bootcampId }) {
 
     let qs = [],
       sols = [],
-      steps = []; // @feature: video-series-v1
+      steps = [], // @feature: video-series-v1
+      files = []; // @feature: project-files-v1
     if (ids.length) {
-      const [{ data: q }, { data: s }, { data: st }] = await Promise.all([
+      const [{ data: q }, { data: s }, { data: st }, { data: f }] = await Promise.all([
         supabase.from("questions").select("*").in("item_id", ids).order("position"),
         supabase.from("item_solutions").select("*").in("item_id", ids).order("position"),
         supabase.from("item_steps").select("*").in("item_id", ids).order("position"),
+        supabase.from("item_files").select("*").in("item_id", ids).order("position"),
       ]);
       qs = q || [];
       sols = s || [];
       steps = st || [];
+      files = f || [];
     }
     const built = (its || []).map((it) => ({
       ...it,
       solutions: sols.filter((s) => s.item_id === it.id),
       steps: steps.filter((s) => s.item_id === it.id),
+      files: files.filter((f) => f.item_id === it.id),
       questions: qs.filter((q) => q.item_id === it.id).map((q) => ({ ...q, options: q.options || [] })),
     }));
     setItems(built);
@@ -527,8 +531,8 @@ export default function LearnPlayer({ bootcampId }) {
     const { data } = await supabase.storage.from("workbooks").createSignedUrl(bc.workbook_path, 3600);
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }
-  // @feature: video-series-v1 — per-Project starting template.
-  async function downloadTemplate(path) {
+  // @feature: project-files-v1 — any file attached to an item.
+  async function downloadFile(path) {
     const { data } = await supabase.storage.from("workbooks").createSignedUrl(path, 3600);
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }
@@ -712,6 +716,12 @@ export default function LearnPlayer({ bootcampId }) {
 
         {(it.type === "video" || it.type === "project_video") && (
           <>
+            {/* @feature: project-files-v1 — Project instructions, above the video */}
+            {it.type === "project_video" && it.intro_text ? (
+              <div className="drill" style={{ whiteSpace: "pre-wrap" }}>
+                {it.intro_text}
+              </div>
+            ) : null}
             {videoId ? (
               <div className="embed" key={`yt-wrap-${it.id}`}>
                 <div id={`yt-${it.id}`} className="yt-host" />
@@ -722,15 +732,15 @@ export default function LearnPlayer({ bootcampId }) {
               </div>
             )}
             {it.type === "video" && it.drill_text ? <div className="drill">{it.drill_text}</div> : null}
-            {/* @feature: video-series-v1 — Project starting template */}
-            {it.type === "project_video" && it.template_path ? (
-              <button
-                className="btn ghost sm"
-                style={{ margin: "8px 0 4px" }}
-                onClick={() => downloadTemplate(it.template_path)}
-              >
-                Download starting template
-              </button>
+            {/* @feature: project-files-v1 — attached files */}
+            {it.type === "project_video" && (it.files || []).length ? (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
+                {(it.files || []).map((f) => (
+                  <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+                    ↓ {f.label || f.path.split("/").pop()}
+                  </button>
+                ))}
+              </div>
             ) : null}
             {it.solutions && it.solutions.length ? (
               <div style={{ margin: "6px 0 4px" }}>
