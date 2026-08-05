@@ -5,7 +5,17 @@
 // point a student has watched and snap any forward-seek back to it. Backward
 // seeks are always free. This is a deterrent for casual skipping, not a hard
 // lock — the unlisted YouTube URL is still directly reachable outside the app.
-// Furthest-watched is persisted to public.video_progress (enrollment_id, item_id).
+//
+// @feature: video-series-v1
+// A video_series item holds an ordered run of steps (e.g. the 12-step DCF model
+// build). The item renders as ONE lesson with pinned intro text + shared
+// resource links, an internal Previous/Next Step control, and a single
+// completion for the whole series. Per-step furthest-watched lives in
+// public.step_progress (enrollment_id, step_id) — a separate table from
+// video_progress, which is unique on (enrollment_id, item_id) and structurally
+// can't hold many videos under one item. Duration capture for steps happens in
+// PreviewPlayer only (staff-only write access to item_steps under RLS), exactly
+// as items.duration_seconds already works.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -96,10 +106,16 @@ function renderPrompt(text) {
 }
 
 function kindShort(t) {
-  return t === "knowledge_check" ? "Quiz" : t === "project_video" ? "Project" : "Video";
+  if (t === "knowledge_check") return "Quiz";
+  if (t === "project_video") return "Project";
+  if (t === "video_series") return "Series";
+  return "Video";
 }
 function kindLong(t) {
-  return t === "knowledge_check" ? "Knowledge check" : t === "project_video" ? "Project" : "Lesson";
+  if (t === "knowledge_check") return "Knowledge check";
+  if (t === "project_video") return "Project";
+  if (t === "video_series") return "Video series";
+  return "Lesson";
 }
 
 export default function LearnPlayer({ bootcampId }) {
@@ -118,6 +134,8 @@ export default function LearnPlayer({ bootcampId }) {
   const [view, setView] = useState("map"); // "map" | "lesson" — course opens on the tile map
   const [attempts, setAttempts] = useState({}); // item_id -> { started_at, submitted_at }
   const [videoProgress, setVideoProgress] = useState({}); // item_id -> furthest_seconds watched
+  const [stepProgress, setStepProgress] = useState({}); // @feature: video-series-v1 — step_id -> furthest_seconds
+  const [seriesStep, setSeriesStep] = useState({}); // @feature: video-series-v1 — item_id -> active step index
   const [nowTs, setNowTs] = useState(Date.now());
   const answersRef = useRef(answers);
   answersRef.current = answers;
@@ -157,27 +175,32 @@ export default function LearnPlayer({ bootcampId }) {
     const ids = (its || []).map((i) => i.id);
 
     let qs = [],
-      sols = [];
+      sols = [],
+      steps = []; // @feature: video-series-v1
     if (ids.length) {
-      const [{ data: q }, { data: s }] = await Promise.all([
+      const [{ data: q }, { data: s }, { data: st }] = await Promise.all([
         supabase.from("questions").select("*").in("item_id", ids).order("position"),
         supabase.from("item_solutions").select("*").in("item_id", ids).order("position"),
+        supabase.from("item_steps").select("*").in("item_id", ids).order("position"),
       ]);
       qs = q || [];
       sols = s || [];
+      steps = st || [];
     }
     const built = (its || []).map((it) => ({
       ...it,
       solutions: sols.filter((s) => s.item_id === it.id),
+      steps: steps.filter((s) => s.item_id === it.id),
       questions: qs.filter((q) => q.item_id === it.id).map((q) => ({ ...q, options: q.options || [] })),
     }));
     setItems(built);
 
-    const [{ data: comp }, { data: sc }, { data: att }, { data: vp }] = await Promise.all([
+    const [{ data: comp }, { data: sc }, { data: att }, { data: vp }, { data: sp }] = await Promise.all([
       supabase.from("completions").select("item_id").eq("enrollment_id", enrRow.id),
       supabase.from("quiz_scores").select("item_id, score, total").eq("enrollment_id", enrRow.id),
       supabase.from("quiz_attempts").select("item_id, started_at, submitted_at").eq("enrollment_id", enrRow.id),
       supabase.from("video_progress").select("item_id, furthest_seconds").eq("enrollment_id", enrRow.id),
+      supabase.from("step_progress").select("step_id, furthest_seconds").eq("enrollment_id", enrRow.id),
     ]);
     const compSet = new Set((comp || []).map((c) => c.item_id));
     setCompleted(compSet);
@@ -186,6 +209,22 @@ export default function LearnPlayer({ bootcampId }) {
       Object.fromEntries((att || []).map((a) => [a.item_id, { started_at: a.started_at, submitted_at: a.submitted_at }]))
     );
     setVideoProgress(Object.fromEntries((vp || []).map((r) => [r.item_id, Number(r.furthest_seconds) || 0])));
+
+    // @feature: video-series-v1 — resume each series on the furthest step the
+    // student has actually started, so a 12-step build picked up on day two
+    // doesn't require clicking Next eleven times.
+    const spMap = Object.fromEntries((sp || []).map((r) => [r.step_id, Number(r.furthest_seconds) || 0]));
+    setStepProgress(spMap);
+    const initialSeriesStep = {};
+    built.forEach((it) => {
+      if (it.type !== "video_series") return;
+      let furthestIdx = 0;
+      (it.steps || []).forEach((s, idx) => {
+        if ((spMap[s.id] || 0) > 0) furthestIdx = idx;
+      });
+      initialSeriesStep[it.id] = furthestIdx;
+    });
+    setSeriesStep(initialSeriesStep);
 
     const firstIncomplete = built.findIndex((it) => !compSet.has(it.id));
     setCurrent(firstIncomplete === -1 ? 0 : firstIncomplete);
@@ -227,31 +266,70 @@ export default function LearnPlayer({ bootcampId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, items, attempts, submitted]);
 
+  // @feature: video-series-v1
+  // Whichever video is on screen right now — either the item's own video, or
+  // the active step's video inside a series. Derived as primitives so the
+  // player effect below re-runs on step changes without re-running on every
+  // unrelated state update.
+  const activeItem = items[current];
+  const activeIsSeries = activeItem?.type === "video_series";
+  const activeStepIdx = activeIsSeries
+    ? Math.min(seriesStep[activeItem.id] ?? 0, Math.max(0, (activeItem.steps || []).length - 1))
+    : -1;
+  const activeStep = activeIsSeries ? (activeItem.steps || [])[activeStepIdx] : null;
+  const activeVideoKey = activeItem
+    ? activeIsSeries
+      ? activeStep?.id || null
+      : activeItem.type === "video" || activeItem.type === "project_video"
+      ? activeItem.id
+      : null
+    : null;
+  const activeVideoUrl = activeIsSeries ? activeStep?.video_url || "" : activeItem?.video_url || "";
+
   // No-skip-forward video control: create/tear down a YT.Player for whichever
-  // item is currently active. Polls playback position; any forward jump past
-  // the furthest point ever reached gets snapped back. Backward seeks are
-  // always allowed. Furthest-watched is persisted (throttled) to video_progress.
+  // video is active. Polls playback position; any forward jump past the
+  // furthest point ever reached gets snapped back. Backward seeks are always
+  // allowed. Furthest-watched is persisted (throttled) to video_progress for a
+  // plain item, or step_progress for a series step.
   useEffect(() => {
-    const it = items[current];
-    if (!it || (it.type !== "video" && it.type !== "project_video") || !enr) return;
-    const videoId = ytVideoId(it.video_url);
+    if (!activeVideoKey || !enr) return;
+    const videoId = ytVideoId(activeVideoUrl);
     if (!videoId) return;
+
+    const isStep = activeIsSeries;
+    const hostId = isStep ? `yt-step-${activeVideoKey}` : `yt-${activeVideoKey}`;
 
     let destroyed = false;
     let player = null;
     let pollIv = null;
     let saveIv = null;
-    let furthest = videoProgress[it.id] || 0;
+    let furthest = (isStep ? stepProgress[activeVideoKey] : videoProgress[activeVideoKey]) || 0;
     let lastSaved = furthest;
-    const hostId = `yt-${it.id}`;
 
     const persist = async (seconds) => {
       if (!enr) return;
       try {
-        await supabase.from("video_progress").upsert(
-          { enrollment_id: enr.id, item_id: it.id, furthest_seconds: seconds, updated_at: new Date().toISOString() },
-          { onConflict: "enrollment_id,item_id" }
-        );
+        if (isStep) {
+          await supabase.from("step_progress").upsert(
+            {
+              enrollment_id: enr.id,
+              step_id: activeVideoKey,
+              furthest_seconds: seconds,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "enrollment_id,step_id" }
+          );
+        } else {
+          await supabase.from("video_progress").upsert(
+            {
+              enrollment_id: enr.id,
+              item_id: activeVideoKey,
+              furthest_seconds: seconds,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "enrollment_id,item_id" }
+          );
+        }
       } catch {
         // best-effort; a failed save just means a slightly larger delta gets retried next tick
       }
@@ -305,7 +383,11 @@ export default function LearnPlayer({ bootcampId }) {
         lastSaved = furthest;
         persist(furthest);
       }
-      setVideoProgress((prev) => ({ ...prev, [it.id]: Math.max(prev[it.id] || 0, furthest) }));
+      if (isStep) {
+        setStepProgress((prev) => ({ ...prev, [activeVideoKey]: Math.max(prev[activeVideoKey] || 0, furthest) }));
+      } else {
+        setVideoProgress((prev) => ({ ...prev, [activeVideoKey]: Math.max(prev[activeVideoKey] || 0, furthest) }));
+      }
       if (player && typeof player.destroy === "function") {
         try {
           player.destroy();
@@ -316,7 +398,7 @@ export default function LearnPlayer({ bootcampId }) {
       playerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, items, enr]);
+  }, [activeVideoKey, activeVideoUrl, activeIsSeries, enr]);
 
   const totalW = items.reduce((s, it) => s + (it.weight || 1), 0);
   const doneW = items.filter((it) => completed.has(it.id)).reduce((s, it) => s + (it.weight || 1), 0);
@@ -337,6 +419,16 @@ export default function LearnPlayer({ bootcampId }) {
   }
   function backToMap() {
     setView("map");
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  // @feature: video-series-v1 — move within a series without leaving the item.
+  function goStep(it, d) {
+    const steps = it.steps || [];
+    setSeriesStep((prev) => {
+      const cur = prev[it.id] ?? 0;
+      const next = Math.min(steps.length - 1, Math.max(0, cur + d));
+      return { ...prev, [it.id]: next };
+    });
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -435,6 +527,11 @@ export default function LearnPlayer({ bootcampId }) {
     const { data } = await supabase.storage.from("workbooks").createSignedUrl(bc.workbook_path, 3600);
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }
+  // @feature: video-series-v1 — per-Project starting template.
+  async function downloadTemplate(path) {
+    const { data } = await supabase.storage.from("workbooks").createSignedUrl(path, 3600);
+    if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+  }
 
   // Tile-map course entry screen: shown first when opening a bootcamp.
   // Every item is always clickable (locked decision: free navigation, no
@@ -503,12 +600,93 @@ export default function LearnPlayer({ bootcampId }) {
                       {score.score}/{score.total}
                     </div>
                   ) : null}
+                  {/* @feature: video-series-v1 — step count hint on the tile */}
+                  {it.type === "video_series" && (it.steps || []).length ? (
+                    <div className="note" style={{ fontSize: 12 }}>
+                      {(it.steps || []).length} steps
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
           </div>
         )}
       </div>
+    );
+  }
+
+  // @feature: video-series-v1
+  function renderSeries(it, done) {
+    const steps = it.steps || [];
+    const si = Math.min(seriesStep[it.id] ?? 0, Math.max(0, steps.length - 1));
+    const s = steps[si];
+    const stepVideoId = s ? ytVideoId(s.video_url) : null;
+    return (
+      <>
+        {it.intro_text ? (
+          <div className="drill" style={{ whiteSpace: "pre-wrap" }}>
+            {it.intro_text}
+          </div>
+        ) : null}
+
+        {it.solutions && it.solutions.length ? (
+          <div style={{ margin: "6px 0 12px" }}>
+            {it.solutions.map((r) =>
+              r.url ? (
+                <a key={r.id} className="sol-link" href={r.url} target="_blank" rel="noreferrer">
+                  ▸ {r.title || "Resource"}
+                </a>
+              ) : null
+            )}
+          </div>
+        ) : null}
+
+        {steps.length === 0 ? (
+          <div className="stub">No steps in this series yet.</div>
+        ) : (
+          <>
+            <h3 className="lesson-h" style={{ fontSize: 18, margin: "14px 0 8px" }}>
+              {s.title || `Step ${si + 1}`}
+            </h3>
+            {stepVideoId ? (
+              <div className="embed" key={`yt-step-wrap-${s.id}`}>
+                <div id={`yt-step-${s.id}`} className="yt-host" />
+              </div>
+            ) : (
+              <div className="embed-ph">
+                <span>Video coming soon</span>
+              </div>
+            )}
+            {s.solution_url ? (
+              <div style={{ margin: "6px 0 4px" }}>
+                <a className="sol-link" href={s.solution_url} target="_blank" rel="noreferrer">
+                  ▸ {s.solution_title || `Step ${si + 1} solution`}
+                </a>
+              </div>
+            ) : null}
+            <div className="player-nav" style={{ marginTop: 12 }}>
+              <button className="btn ghost" disabled={si === 0} onClick={() => goStep(it, -1)}>
+                ← Previous Step
+              </button>
+              <span className="note">
+                Step {si + 1} of {steps.length}
+              </span>
+              <button
+                className="btn pri"
+                disabled={si === steps.length - 1}
+                onClick={() => goStep(it, 1)}
+              >
+                Next Step →
+              </button>
+            </div>
+          </>
+        )}
+
+        <div className="complete-row" onClick={() => toggleComplete(it)}>
+          <span className={`check ${done ? "on" : ""}`}>{done ? "✓" : ""}</span>
+          {done ? "Completed" : "Mark series complete"}
+        </div>
+      </>
     );
   }
 
@@ -529,6 +707,9 @@ export default function LearnPlayer({ bootcampId }) {
         <div className="lesson-kind">{kindLong(it.type)}</div>
         <h2 className="lesson-h">{it.title}</h2>
 
+        {/* @feature: video-series-v1 */}
+        {it.type === "video_series" && renderSeries(it, done)}
+
         {(it.type === "video" || it.type === "project_video") && (
           <>
             {videoId ? (
@@ -541,6 +722,16 @@ export default function LearnPlayer({ bootcampId }) {
               </div>
             )}
             {it.type === "video" && it.drill_text ? <div className="drill">{it.drill_text}</div> : null}
+            {/* @feature: video-series-v1 — Project starting template */}
+            {it.type === "project_video" && it.template_path ? (
+              <button
+                className="btn ghost sm"
+                style={{ margin: "8px 0 4px" }}
+                onClick={() => downloadTemplate(it.template_path)}
+              >
+                Download starting template
+              </button>
+            ) : null}
             {it.solutions && it.solutions.length ? (
               <div style={{ margin: "6px 0 4px" }}>
                 {it.solutions.map((s) =>

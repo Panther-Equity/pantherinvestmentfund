@@ -3,15 +3,21 @@
 // Admin-only "Preview as student" player.
 // Renders a bootcamp with the exact same UI students see, but:
 //   - no enrollment is required (staff can preview any bootcamp)
-//   - NOTHING is written to the database — completion checks, quiz
-//     submissions, AND furthest-watched video position are all local-only
-//     component state, so previewing never touches real progress/score
-//     records or public.video_progress.
+//   - NOTHING student-facing is written to the database — completion checks,
+//     quiz submissions, AND furthest-watched position (item- and step-level
+//     alike) are all local-only component state, so previewing never touches
+//     real progress/score records, public.video_progress, or
+//     public.step_progress.
 //
-// Mirrors LearnPlayer's no-skip-forward video control (YouTube IFrame Player
-// API, forward-seek snapped back to the furthest point reached, backward
-// seeks always free) but furthest-watched resets on reload since it's kept
-// in local state only.
+// The ONE exception, by design: video duration capture. Only staff can write
+// items/item_steps content under RLS, so Preview is where duration_seconds gets
+// learned — for plain video items and, as of video-series-v1, for each step of
+// a series. That's what makes the admin time-progress metric work.
+//
+// @feature: video-series-v1
+// Series render identically to LearnPlayer (pinned intro + shared resources,
+// internal Previous/Next Step, one completion for the whole run), but the active
+// step resets to the first on reload since step progress is local-only here.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -100,10 +106,16 @@ function renderPrompt(text) {
 }
 
 function kindShort(t) {
-  return t === "knowledge_check" ? "Quiz" : t === "project_video" ? "Project" : "Video";
+  if (t === "knowledge_check") return "Quiz";
+  if (t === "project_video") return "Project";
+  if (t === "video_series") return "Series";
+  return "Video";
 }
 function kindLong(t) {
-  return t === "knowledge_check" ? "Knowledge check" : t === "project_video" ? "Project" : "Lesson";
+  if (t === "knowledge_check") return "Knowledge check";
+  if (t === "project_video") return "Project";
+  if (t === "video_series") return "Video series";
+  return "Lesson";
 }
 
 export default function PreviewPlayer({ bootcampId }) {
@@ -121,6 +133,8 @@ export default function PreviewPlayer({ bootcampId }) {
   const [view, setView] = useState("map"); // "map" | "lesson" — course opens on the tile map
   const [previewStarts, setPreviewStarts] = useState({}); // item_id -> start ts (local, no DB)
   const [videoProgress, setVideoProgress] = useState({}); // item_id -> furthest_seconds (local only)
+  const [stepProgress, setStepProgress] = useState({}); // @feature: video-series-v1 — step_id -> furthest (local only)
+  const [seriesStep, setSeriesStep] = useState({}); // @feature: video-series-v1 — item_id -> active step index
   const [nowTs, setNowTs] = useState(Date.now());
   const answersRef = useRef(answers);
   answersRef.current = answers;
@@ -147,22 +161,27 @@ export default function PreviewPlayer({ bootcampId }) {
     const ids = (its || []).map((i) => i.id);
 
     let qs = [],
-      sols = [];
+      sols = [],
+      steps = []; // @feature: video-series-v1
     if (ids.length) {
-      const [{ data: q }, { data: s }] = await Promise.all([
+      const [{ data: q }, { data: s }, { data: st }] = await Promise.all([
         supabase.from("questions").select("*").in("item_id", ids).order("position"),
         supabase.from("item_solutions").select("*").in("item_id", ids).order("position"),
+        supabase.from("item_steps").select("*").in("item_id", ids).order("position"),
       ]);
       qs = q || [];
       sols = s || [];
+      steps = st || [];
     }
     const built = (its || []).map((it) => ({
       ...it,
       solutions: sols.filter((s) => s.item_id === it.id),
+      steps: steps.filter((s) => s.item_id === it.id),
       questions: qs.filter((q) => q.item_id === it.id).map((q) => ({ ...q, options: q.options || [] })),
     }));
     setItems(built);
     setCurrent(0);
+    setSeriesStep({});
     setLoading(false);
   }, [bootcampId, supabase]);
 
@@ -200,20 +219,43 @@ export default function PreviewPlayer({ bootcampId }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, items, previewStarts, submitted]);
 
+  // @feature: video-series-v1 — the video currently on screen: either the
+  // item's own, or the active step's inside a series. Derived as primitives so
+  // the player effect re-runs on step change but not on unrelated updates.
+  const activeItem = items[current];
+  const activeIsSeries = activeItem?.type === "video_series";
+  const activeStepIdx = activeIsSeries
+    ? Math.min(seriesStep[activeItem.id] ?? 0, Math.max(0, (activeItem.steps || []).length - 1))
+    : -1;
+  const activeStep = activeIsSeries ? (activeItem.steps || [])[activeStepIdx] : null;
+  const activeVideoKey = activeItem
+    ? activeIsSeries
+      ? activeStep?.id || null
+      : activeItem.type === "video" || activeItem.type === "project_video"
+      ? activeItem.id
+      : null
+    : null;
+  const activeVideoUrl = activeIsSeries ? activeStep?.video_url || "" : activeItem?.video_url || "";
+  const activeKnownDuration = activeIsSeries
+    ? activeStep?.duration_seconds ?? null
+    : activeItem?.duration_seconds ?? null;
+
   // No-skip-forward video control (preview): identical mechanics to LearnPlayer,
-  // but furthest-watched lives in local state only — no DB reads/writes, resets
-  // on reload. Confirms preview never touches public.video_progress.
+  // but furthest-watched lives in local state only — no progress reads/writes,
+  // resets on reload. Confirms preview never touches video_progress or
+  // step_progress. Duration capture IS written (see onReady below).
   useEffect(() => {
-    const it = items[current];
-    if (!it || (it.type !== "video" && it.type !== "project_video")) return;
-    const videoId = ytVideoId(it.video_url);
+    if (!activeVideoKey) return;
+    const videoId = ytVideoId(activeVideoUrl);
     if (!videoId) return;
+
+    const isStep = activeIsSeries;
+    const hostId = isStep ? `yt-step-${activeVideoKey}` : `yt-${activeVideoKey}`;
 
     let destroyed = false;
     let player = null;
     let pollIv = null;
-    let furthest = videoProgress[it.id] || 0;
-    const hostId = `yt-${it.id}`;
+    let furthest = (isStep ? stepProgress[activeVideoKey] : videoProgress[activeVideoKey]) || 0;
 
     loadYouTubeIframeApi().then((YT) => {
       if (destroyed) return;
@@ -225,12 +267,13 @@ export default function PreviewPlayer({ bootcampId }) {
         height: "100%",
         playerVars: { rel: 0, modestbranding: 1 },
         events: {
-          // @feature: time-based-progress-v1
-          // Auto-capture video duration into items.duration_seconds the moment
-          // staff previews it — this is the ONLY place duration gets written,
-          // since only staff has write access to items content (RLS). Only
-          // writes when unknown or off by more than a second (e.g. the video
-          // URL was swapped for a different-length one), so a normal preview
+          // @feature: time-based-progress-v1 / video-series-v1
+          // Auto-capture video duration the moment staff previews it — the ONLY
+          // place duration gets written, since only staff has write access to
+          // items/item_steps content (RLS). Writes to items.duration_seconds for
+          // a plain item, or item_steps.duration_seconds for a series step.
+          // Only writes when unknown or off by more than a second (e.g. the URL
+          // was swapped for a different-length video), so a normal preview
           // doesn't hammer the DB on every open.
           onReady: (e) => {
             let dur = null;
@@ -240,14 +283,27 @@ export default function PreviewPlayer({ bootcampId }) {
               /* no-op */
             }
             if (typeof dur !== "number" || !(dur > 0)) return;
-            const known = it.duration_seconds;
-            if (known != null && Math.abs(known - dur) <= 1) return;
+            if (activeKnownDuration != null && Math.abs(activeKnownDuration - dur) <= 1) return;
+            const table = isStep ? "item_steps" : "items";
             supabase
-              .from("items")
+              .from(table)
               .update({ duration_seconds: dur })
-              .eq("id", it.id)
+              .eq("id", activeVideoKey)
               .then(() => {
-                setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, duration_seconds: dur } : x)));
+                setItems((prev) =>
+                  prev.map((x) => {
+                    if (isStep) {
+                      if (!x.steps || !x.steps.some((s) => s.id === activeVideoKey)) return x;
+                      return {
+                        ...x,
+                        steps: x.steps.map((s) =>
+                          s.id === activeVideoKey ? { ...s, duration_seconds: dur } : s
+                        ),
+                      };
+                    }
+                    return x.id === activeVideoKey ? { ...x, duration_seconds: dur } : x;
+                  })
+                );
               });
           },
         },
@@ -278,7 +334,11 @@ export default function PreviewPlayer({ bootcampId }) {
     return () => {
       destroyed = true;
       if (pollIv) clearInterval(pollIv);
-      setVideoProgress((prev) => ({ ...prev, [it.id]: Math.max(prev[it.id] || 0, furthest) }));
+      if (isStep) {
+        setStepProgress((prev) => ({ ...prev, [activeVideoKey]: Math.max(prev[activeVideoKey] || 0, furthest) }));
+      } else {
+        setVideoProgress((prev) => ({ ...prev, [activeVideoKey]: Math.max(prev[activeVideoKey] || 0, furthest) }));
+      }
       if (player && typeof player.destroy === "function") {
         try {
           player.destroy();
@@ -289,7 +349,7 @@ export default function PreviewPlayer({ bootcampId }) {
       playerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, items]);
+  }, [activeVideoKey, activeVideoUrl, activeIsSeries]);
 
   const totalW = items.reduce((s, it) => s + (it.weight || 1), 0);
   const doneW = items.filter((it) => completed.has(it.id)).reduce((s, it) => s + (it.weight || 1), 0);
@@ -310,6 +370,16 @@ export default function PreviewPlayer({ bootcampId }) {
   }
   function backToMap() {
     setView("map");
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  // @feature: video-series-v1
+  function goStep(it, d) {
+    const steps = it.steps || [];
+    setSeriesStep((prev) => {
+      const cur = prev[it.id] ?? 0;
+      const next = Math.min(steps.length - 1, Math.max(0, cur + d));
+      return { ...prev, [it.id]: next };
+    });
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -364,6 +434,86 @@ export default function PreviewPlayer({ bootcampId }) {
     const { data } = await supabase.storage.from("workbooks").createSignedUrl(bc.workbook_path, 3600);
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }
+  // @feature: video-series-v1
+  async function downloadTemplate(path) {
+    const { data } = await supabase.storage.from("workbooks").createSignedUrl(path, 3600);
+    if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+  }
+
+  // @feature: video-series-v1
+  function renderSeries(it, done) {
+    const steps = it.steps || [];
+    const si = Math.min(seriesStep[it.id] ?? 0, Math.max(0, steps.length - 1));
+    const s = steps[si];
+    const stepVideoId = s ? ytVideoId(s.video_url) : null;
+    return (
+      <>
+        {it.intro_text ? (
+          <div className="drill" style={{ whiteSpace: "pre-wrap" }}>
+            {it.intro_text}
+          </div>
+        ) : null}
+
+        {it.solutions && it.solutions.length ? (
+          <div style={{ margin: "6px 0 12px" }}>
+            {it.solutions.map((r) =>
+              r.url ? (
+                <a key={r.id} className="sol-link" href={r.url} target="_blank" rel="noreferrer">
+                  ▸ {r.title || "Resource"}
+                </a>
+              ) : null
+            )}
+          </div>
+        ) : null}
+
+        {steps.length === 0 ? (
+          <div className="stub">No steps in this series yet.</div>
+        ) : (
+          <>
+            <h3 className="lesson-h" style={{ fontSize: 18, margin: "14px 0 8px" }}>
+              {s.title || `Step ${si + 1}`}
+            </h3>
+            {stepVideoId ? (
+              <div className="embed" key={`yt-step-wrap-${s.id}`}>
+                <div id={`yt-step-${s.id}`} className="yt-host" />
+              </div>
+            ) : (
+              <div className="embed-ph">
+                <span>Video coming soon</span>
+              </div>
+            )}
+            {s.solution_url ? (
+              <div style={{ margin: "6px 0 4px" }}>
+                <a className="sol-link" href={s.solution_url} target="_blank" rel="noreferrer">
+                  ▸ {s.solution_title || `Step ${si + 1} solution`}
+                </a>
+              </div>
+            ) : null}
+            <div className="player-nav" style={{ marginTop: 12 }}>
+              <button className="btn ghost" disabled={si === 0} onClick={() => goStep(it, -1)}>
+                ← Previous Step
+              </button>
+              <span className="note">
+                Step {si + 1} of {steps.length}
+              </span>
+              <button
+                className="btn pri"
+                disabled={si === steps.length - 1}
+                onClick={() => goStep(it, 1)}
+              >
+                Next Step →
+              </button>
+            </div>
+          </>
+        )}
+
+        <div className="complete-row" onClick={() => toggleComplete(it)}>
+          <span className={`check ${done ? "on" : ""}`}>{done ? "✓" : ""}</span>
+          {done ? "Completed" : "Mark series complete"}
+        </div>
+      </>
+    );
+  }
 
   function renderItem(it) {
     const done = completed.has(it.id);
@@ -382,6 +532,9 @@ export default function PreviewPlayer({ bootcampId }) {
         <div className="lesson-kind">{kindLong(it.type)}</div>
         <h2 className="lesson-h">{it.title}</h2>
 
+        {/* @feature: video-series-v1 */}
+        {it.type === "video_series" && renderSeries(it, done)}
+
         {(it.type === "video" || it.type === "project_video") && (
           <>
             {videoId ? (
@@ -394,6 +547,16 @@ export default function PreviewPlayer({ bootcampId }) {
               </div>
             )}
             {it.type === "video" && it.drill_text ? <div className="drill">{it.drill_text}</div> : null}
+            {/* @feature: video-series-v1 — Project starting template */}
+            {it.type === "project_video" && it.template_path ? (
+              <button
+                className="btn ghost sm"
+                style={{ margin: "8px 0 4px" }}
+                onClick={() => downloadTemplate(it.template_path)}
+              >
+                Download starting template
+              </button>
+            ) : null}
             {it.solutions && it.solutions.length ? (
               <div style={{ margin: "6px 0 4px" }}>
                 {it.solutions.map((s) =>
@@ -509,7 +672,7 @@ export default function PreviewPlayer({ bootcampId }) {
   // Every item is always clickable (locked decision: free navigation, no
   // sequential locking) — the map is just a different layout for the same
   // click-to-jump behavior the sidebar list already has. Local-only, same as
-  // everything else in preview — nothing here reads or writes the database.
+  // everything else in preview — nothing here reads or writes student data.
   function renderMap() {
     return (
       <div>
@@ -572,6 +735,12 @@ export default function PreviewPlayer({ bootcampId }) {
                   {score ? (
                     <div className="note" style={{ fontSize: 12 }}>
                       {score.score}/{score.total}
+                    </div>
+                  ) : null}
+                  {/* @feature: video-series-v1 */}
+                  {it.type === "video_series" && (it.steps || []).length ? (
+                    <div className="note" style={{ fontSize: 12 }}>
+                      {(it.steps || []).length} steps
                     </div>
                   ) : null}
                 </div>
