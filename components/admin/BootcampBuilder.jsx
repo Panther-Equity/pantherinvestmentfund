@@ -323,8 +323,7 @@ export default function BootcampBuilder({ id }) {
         title: it.title,
         position: i,
         weight: it.type === "project_video" ? 2 : it.type === "video_series" ? 3 : 1,
-        video_url:
-          it.type === "knowledge_check" || it.type === "video_series" ? null : it.video_url || null,
+        video_url: it.type === "video" ? it.video_url || null : null,
         drill_text: it.type === "video" ? it.drill_text || null : null,
         intro_text:
           it.type === "video_series" || it.type === "project_video" ? it.intro_text || null : null,
@@ -603,7 +602,7 @@ export default function BootcampBuilder({ id }) {
                 </div>
               )}
 
-              {(it.type === "video" || it.type === "project_video") && (
+              {it.type === "video" && (
                 <input
                   className="input subfield"
                   value={it.video_url}
@@ -669,12 +668,16 @@ export default function BootcampBuilder({ id }) {
                 </div>
               )}
 
-              {/* Solution walkthrough links — video and Project items alike. */}
+              {/* Solution walkthrough links — videos, and Projects (gated
+                  server-side until the student submits). */}
               {(it.type === "video" || it.type === "project_video") &&
                 renderLinkRepeater(it, i, {
                   labelPlaceholder: "Solution label",
                   urlPlaceholder: "Solution YouTube link",
-                  addLabel: "+ Add solution video (optional)",
+                  addLabel:
+                    it.type === "project_video"
+                      ? "+ Add solution video (hidden until they submit)"
+                      : "+ Add solution video (optional)",
                 })}
 
               {/* @feature: video-series-v1 — series editor */}

@@ -136,6 +136,9 @@ export default function LearnPlayer({ bootcampId }) {
   const [videoProgress, setVideoProgress] = useState({}); // item_id -> furthest_seconds watched
   const [stepProgress, setStepProgress] = useState({}); // @feature: video-series-v1 — step_id -> furthest_seconds
   const [seriesStep, setSeriesStep] = useState({}); // @feature: video-series-v1 — item_id -> active step index
+  const [submissions, setSubmissions] = useState({}); // @feature: project-submit-gate-v1 — item_id -> submission row
+  const [submitBusy, setSubmitBusy] = useState(null); // item_id currently uploading
+  const [submitError, setSubmitError] = useState("");
   const [nowTs, setNowTs] = useState(Date.now());
   const answersRef = useRef(answers);
   answersRef.current = answers;
@@ -199,13 +202,18 @@ export default function LearnPlayer({ bootcampId }) {
     }));
     setItems(built);
 
-    const [{ data: comp }, { data: sc }, { data: att }, { data: vp }, { data: sp }] = await Promise.all([
-      supabase.from("completions").select("item_id").eq("enrollment_id", enrRow.id),
-      supabase.from("quiz_scores").select("item_id, score, total").eq("enrollment_id", enrRow.id),
-      supabase.from("quiz_attempts").select("item_id, started_at, submitted_at").eq("enrollment_id", enrRow.id),
-      supabase.from("video_progress").select("item_id, furthest_seconds").eq("enrollment_id", enrRow.id),
-      supabase.from("step_progress").select("step_id, furthest_seconds").eq("enrollment_id", enrRow.id),
-    ]);
+    const [{ data: comp }, { data: sc }, { data: att }, { data: vp }, { data: sp }, { data: subs }] =
+      await Promise.all([
+        supabase.from("completions").select("item_id").eq("enrollment_id", enrRow.id),
+        supabase.from("quiz_scores").select("item_id, score, total").eq("enrollment_id", enrRow.id),
+        supabase.from("quiz_attempts").select("item_id, started_at, submitted_at").eq("enrollment_id", enrRow.id),
+        supabase.from("video_progress").select("item_id, furthest_seconds").eq("enrollment_id", enrRow.id),
+        supabase.from("step_progress").select("step_id, furthest_seconds").eq("enrollment_id", enrRow.id),
+        supabase
+          .from("project_submissions")
+          .select("item_id, path, filename, submitted_at, unlocked_by_staff")
+          .eq("enrollment_id", enrRow.id),
+      ]);
     const compSet = new Set((comp || []).map((c) => c.item_id));
     setCompleted(compSet);
     setSubmitted(Object.fromEntries((sc || []).map((r) => [r.item_id, { score: r.score, total: r.total }])));
@@ -213,6 +221,8 @@ export default function LearnPlayer({ bootcampId }) {
       Object.fromEntries((att || []).map((a) => [a.item_id, { started_at: a.started_at, submitted_at: a.submitted_at }]))
     );
     setVideoProgress(Object.fromEntries((vp || []).map((r) => [r.item_id, Number(r.furthest_seconds) || 0])));
+    // @feature: project-submit-gate-v1
+    setSubmissions(Object.fromEntries((subs || []).map((r) => [r.item_id, r])));
 
     // @feature: video-series-v1 — resume each series on the furthest step the
     // student has actually started, so a 12-step build picked up on day two
@@ -284,7 +294,7 @@ export default function LearnPlayer({ bootcampId }) {
   const activeVideoKey = activeItem
     ? activeIsSeries
       ? activeStep?.id || null
-      : activeItem.type === "video" || activeItem.type === "project_video"
+      : activeItem.type === "video"
       ? activeItem.id
       : null
     : null;
@@ -619,6 +629,156 @@ export default function LearnPlayer({ bootcampId }) {
     );
   }
 
+  // @feature: project-submit-gate-v1
+  // Upload the student's work, record the submission, then re-fetch this item's
+  // solutions. That re-fetch is the whole mechanism: item_solutions has a
+  // RESTRICTIVE policy that returns zero rows for an unsubmitted Project, so
+  // before this moment the solution links genuinely aren't in the client at all.
+  async function submitProject(e, it) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setSubmitBusy(it.id);
+    setSubmitError("");
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      const path = `${user.id}/${it.id}/${file.name}`;
+      const { error: ue } = await supabase.storage
+        .from("submissions")
+        .upload(path, file, { upsert: true });
+      if (ue) throw ue;
+
+      const row = {
+        enrollment_id: enr.id,
+        item_id: it.id,
+        path,
+        filename: file.name,
+        submitted_at: new Date().toISOString(),
+      };
+      const { error: re } = await supabase
+        .from("project_submissions")
+        .upsert(row, { onConflict: "enrollment_id,item_id" });
+      if (re) throw re;
+      setSubmissions((prev) => ({ ...prev, [it.id]: { ...row, unlocked_by_staff: false } }));
+
+      const { data: sols } = await supabase
+        .from("item_solutions")
+        .select("*")
+        .eq("item_id", it.id)
+        .order("position");
+      setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, solutions: sols || [] } : x)));
+    } catch (err) {
+      setSubmitError(err?.message || "Submission failed. Try again.");
+    } finally {
+      setSubmitBusy(null);
+      e.target.value = "";
+    }
+  }
+
+  // @feature: project-submit-gate-v1
+  function renderProject(it, done) {
+    const sub = submissions[it.id];
+    const unlocked = !!sub && (!!sub.submitted_at || !!sub.unlocked_by_staff);
+    const files = it.files || [];
+    return (
+      <>
+        {it.intro_text ? (
+          <div className="drill" style={{ whiteSpace: "pre-wrap" }}>
+            {it.intro_text}
+          </div>
+        ) : null}
+
+        {files.length ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
+            {files.map((f) => (
+              <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+                ↓ {f.label || f.path.split("/").pop()}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        <div
+          style={{
+            marginTop: 16,
+            padding: 16,
+            border: "1px solid var(--line-d)",
+            borderRadius: "var(--r)",
+            background: "var(--wash)",
+          }}
+        >
+          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Your submission</div>
+          {sub && sub.submitted_at ? (
+            <>
+              <p className="note" style={{ marginBottom: 12 }}>
+                Submitted {new Date(sub.submitted_at).toLocaleDateString()}
+                {sub.filename ? ` · ${sub.filename}` : ""}
+              </p>
+              <label className="btn ghost sm" style={{ cursor: "pointer" }}>
+                {submitBusy === it.id ? "Uploading…" : "Replace submission"}
+                <input
+                  type="file"
+                  style={{ display: "none" }}
+                  onChange={(e) => submitProject(e, it)}
+                  disabled={submitBusy === it.id}
+                />
+              </label>
+            </>
+          ) : sub && sub.unlocked_by_staff ? (
+            <p className="note" style={{ marginBottom: 0 }}>
+              Unlocked by staff — no submission needed.
+            </p>
+          ) : (
+            <>
+              <p className="note" style={{ marginBottom: 12, maxWidth: 520 }}>
+                Upload your completed file to submit. The solution walkthrough unlocks once you do —
+                give it your own attempt first.
+              </p>
+              <label className="btn pri sm" style={{ cursor: "pointer" }}>
+                {submitBusy === it.id ? "Uploading…" : "Submit your project"}
+                <input
+                  type="file"
+                  style={{ display: "none" }}
+                  onChange={(e) => submitProject(e, it)}
+                  disabled={submitBusy === it.id}
+                />
+              </label>
+            </>
+          )}
+          {submitError ? (
+            <div className="notice error" style={{ marginTop: 12 }}>
+              {submitError}
+            </div>
+          ) : null}
+        </div>
+
+        {unlocked ? (
+          it.solutions && it.solutions.length ? (
+            <div style={{ margin: "14px 0 4px" }}>
+              {it.solutions.map((s) =>
+                s.url ? (
+                  <a key={s.id} className="sol-link" href={s.url} target="_blank" rel="noreferrer">
+                    ▸ {s.title || "Solution walkthrough"}
+                  </a>
+                ) : null
+              )}
+            </div>
+          ) : null
+        ) : (
+          <p className="note" style={{ margin: "14px 0 4px" }}>
+            🔒 Solution walkthrough unlocks after you submit.
+          </p>
+        )}
+
+        <div className="complete-row" onClick={() => toggleComplete(it)}>
+          <span className={`check ${done ? "on" : ""}`}>{done ? "✓" : ""}</span>
+          {done ? "Completed" : "Mark complete"}
+        </div>
+      </>
+    );
+  }
+
   // @feature: video-series-v1
   function renderSeries(it, done) {
     const steps = it.steps || [];
@@ -714,14 +874,11 @@ export default function LearnPlayer({ bootcampId }) {
         {/* @feature: video-series-v1 */}
         {it.type === "video_series" && renderSeries(it, done)}
 
-        {(it.type === "video" || it.type === "project_video") && (
+        {/* @feature: project-submit-gate-v1 — Projects have no video of their own */}
+        {it.type === "project_video" && renderProject(it, done)}
+
+        {it.type === "video" && (
           <>
-            {/* @feature: project-files-v1 — Project instructions, above the video */}
-            {it.type === "project_video" && it.intro_text ? (
-              <div className="drill" style={{ whiteSpace: "pre-wrap" }}>
-                {it.intro_text}
-              </div>
-            ) : null}
             {videoId ? (
               <div className="embed" key={`yt-wrap-${it.id}`}>
                 <div id={`yt-${it.id}`} className="yt-host" />
@@ -731,17 +888,7 @@ export default function LearnPlayer({ bootcampId }) {
                 <span>Video coming soon</span>
               </div>
             )}
-            {it.type === "video" && it.drill_text ? <div className="drill">{it.drill_text}</div> : null}
-            {/* @feature: project-files-v1 — attached files */}
-            {it.type === "project_video" && (it.files || []).length ? (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
-                {(it.files || []).map((f) => (
-                  <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
-                    ↓ {f.label || f.path.split("/").pop()}
-                  </button>
-                ))}
-              </div>
-            ) : null}
+            {it.drill_text ? <div className="drill">{it.drill_text}</div> : null}
             {it.solutions && it.solutions.length ? (
               <div style={{ margin: "6px 0 4px" }}>
                 {it.solutions.map((s) =>

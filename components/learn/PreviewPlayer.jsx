@@ -235,7 +235,7 @@ export default function PreviewPlayer({ bootcampId }) {
   const activeVideoKey = activeItem
     ? activeIsSeries
       ? activeStep?.id || null
-      : activeItem.type === "video" || activeItem.type === "project_video"
+      : activeItem.type === "video"
       ? activeItem.id
       : null
     : null;
@@ -444,6 +444,74 @@ export default function PreviewPlayer({ bootcampId }) {
     if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }
 
+  // @feature: project-submit-gate-v1
+  // Staff preview of a Project. No video (Projects don't carry one), and the
+  // submit control is inert — preview never writes. Solutions ARE shown here
+  // even though a student wouldn't see them pre-submission: the item_solutions
+  // gate exempts staff, which is deliberate so you can check your own links.
+  function renderProject(it, done) {
+    const files = it.files || [];
+    return (
+      <>
+        {it.intro_text ? (
+          <div className="drill" style={{ whiteSpace: "pre-wrap" }}>
+            {it.intro_text}
+          </div>
+        ) : null}
+
+        {files.length ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
+            {files.map((f) => (
+              <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+                ↓ {f.label || f.path.split("/").pop()}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        <div
+          style={{
+            marginTop: 16,
+            padding: 16,
+            border: "1px solid var(--line-d)",
+            borderRadius: "var(--r)",
+            background: "var(--wash)",
+          }}
+        >
+          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Your submission</div>
+          <p className="note" style={{ marginBottom: 12, maxWidth: 520 }}>
+            Students upload their completed file here. Doing so unlocks the solution walkthrough
+            below — it is withheld at the database level until they submit, so it can&rsquo;t be
+            found by digging around the page.
+          </p>
+          <button className="btn pri sm" disabled title="Disabled in preview">
+            Submit your project
+          </button>
+        </div>
+
+        {it.solutions && it.solutions.length ? (
+          <div style={{ margin: "14px 0 4px" }}>
+            <div className="note" style={{ marginBottom: 4 }}>
+              Visible to you as staff · students see this only after submitting
+            </div>
+            {it.solutions.map((s) =>
+              s.url ? (
+                <a key={s.id} className="sol-link" href={s.url} target="_blank" rel="noreferrer">
+                  ▸ {s.title || "Solution walkthrough"}
+                </a>
+              ) : null
+            )}
+          </div>
+        ) : null}
+
+        <div className="complete-row" onClick={() => toggleComplete(it)}>
+          <span className={`check ${done ? "on" : ""}`}>{done ? "✓" : ""}</span>
+          {done ? "Completed" : "Mark complete"}
+        </div>
+      </>
+    );
+  }
+
   // @feature: video-series-v1
   function renderSeries(it, done) {
     const steps = it.steps || [];
@@ -539,14 +607,11 @@ export default function PreviewPlayer({ bootcampId }) {
         {/* @feature: video-series-v1 */}
         {it.type === "video_series" && renderSeries(it, done)}
 
-        {(it.type === "video" || it.type === "project_video") && (
+        {/* @feature: project-submit-gate-v1 — Projects have no video of their own */}
+        {it.type === "project_video" && renderProject(it, done)}
+
+        {it.type === "video" && (
           <>
-            {/* @feature: project-files-v1 — Project instructions, above the video */}
-            {it.type === "project_video" && it.intro_text ? (
-              <div className="drill" style={{ whiteSpace: "pre-wrap" }}>
-                {it.intro_text}
-              </div>
-            ) : null}
             {videoId ? (
               <div className="embed" key={`yt-wrap-${it.id}`}>
                 <div id={`yt-${it.id}`} className="yt-host" />
@@ -556,17 +621,7 @@ export default function PreviewPlayer({ bootcampId }) {
                 <span>Video coming soon</span>
               </div>
             )}
-            {it.type === "video" && it.drill_text ? <div className="drill">{it.drill_text}</div> : null}
-            {/* @feature: project-files-v1 — attached files */}
-            {it.type === "project_video" && (it.files || []).length ? (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
-                {(it.files || []).map((f) => (
-                  <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
-                    ↓ {f.label || f.path.split("/").pop()}
-                  </button>
-                ))}
-              </div>
-            ) : null}
+            {it.drill_text ? <div className="drill">{it.drill_text}</div> : null}
             {it.solutions && it.solutions.length ? (
               <div style={{ margin: "6px 0 4px" }}>
                 {it.solutions.map((s) =>
