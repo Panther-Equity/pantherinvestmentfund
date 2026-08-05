@@ -50,6 +50,7 @@ function makeItem(type) {
       ...base,
       title: "New video series",
       intro_text: "",
+      files: [], // shared files pinned across every step
       steps: [makeStep(1)],
     };
   return {
@@ -376,8 +377,8 @@ export default function BootcampBuilder({ id }) {
             (it.solutions || []).forEach((s, si) =>
               sRows.push({ item_id: it.id, title: s.title, url: s.url, position: si })
             );
-          // @feature: project-files-v1
-          if (it.type === "project_video")
+          // @feature: project-files-v1 — Projects and video series both carry files.
+          if (it.type === "project_video" || it.type === "video_series")
             (it.files || []).forEach((f, fi) =>
               fRows.push({ item_id: it.id, position: fi, label: f.label || "", path: f.path })
             );
@@ -442,6 +443,59 @@ export default function BootcampBuilder({ id }) {
   if (loading) return <div className="stub">Loading…</div>;
 
   const workbookName = bc.workbook_path ? bc.workbook_path.split("/").pop() : null;
+
+  // Shared file-attach block. Used by Project items and by video series (where
+  // the files stay pinned above every step). Uploads land in the `workbooks`
+  // bucket; students download via a signed URL.
+  const renderFileAttach = (it, i, hint) => (
+    <div style={{ marginTop: 10 }}>
+      <div className="note" style={{ marginBottom: 6 }}>
+        {hint}
+      </div>
+      {(it.files || []).map((f, fi) => (
+        <div className="sol" key={f.id || fi}>
+          <input
+            className="input"
+            value={f.label}
+            onChange={(e) => updFile(i, fi, { label: e.target.value })}
+            placeholder="Button label, e.g. DCF Template (Excel)"
+          />
+          <span
+            className="note"
+            style={{
+              fontSize: 11,
+              alignSelf: "center",
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {f.path.split("/").pop()}
+          </span>
+          <button className="iconbtn" title="Move up" onClick={() => moveFile(i, fi, -1)}>
+            ↑
+          </button>
+          <button className="iconbtn" title="Move down" onClick={() => moveFile(i, fi, 1)}>
+            ↓
+          </button>
+          <button className="iconbtn danger" title="Remove file" onClick={() => delFile(i, fi)}>
+            ✕
+          </button>
+        </div>
+      ))}
+      <label className="btn ghost sm" style={{ cursor: "pointer" }}>
+        {uploading ? "Uploading…" : "Attach file(s)"}
+        <input
+          type="file"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => uploadFiles(e, i)}
+          disabled={uploading}
+        />
+      </label>
+    </div>
+  );
 
   // Shared label+URL repeater. Used for video solution walkthroughs, Project
   // solution walkthroughs, and a series' pinned shared resource links.
@@ -623,50 +677,12 @@ export default function BootcampBuilder({ id }) {
               )}
 
               {/* @feature: project-files-v1 — attached files */}
-              {it.type === "project_video" && (
-                <div style={{ marginTop: 10 }}>
-                  <div className="note" style={{ marginBottom: 6 }}>
-                    Attached files — templates, raw data, anything students download to start.
-                    The label is what they see on the button.
-                  </div>
-                  {(it.files || []).map((f, fi) => (
-                    <div className="sol" key={f.id || fi}>
-                      <input
-                        className="input"
-                        value={f.label}
-                        onChange={(e) => updFile(i, fi, { label: e.target.value })}
-                        placeholder="Button label, e.g. DCF Template (Excel)"
-                      />
-                      <span className="note" style={{ fontSize: 11, alignSelf: "center", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {f.path.split("/").pop()}
-                      </span>
-                      <button className="iconbtn" title="Move up" onClick={() => moveFile(i, fi, -1)}>
-                        ↑
-                      </button>
-                      <button className="iconbtn" title="Move down" onClick={() => moveFile(i, fi, 1)}>
-                        ↓
-                      </button>
-                      <button
-                        className="iconbtn danger"
-                        title="Remove file"
-                        onClick={() => delFile(i, fi)}
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                  <label className="btn ghost sm" style={{ cursor: "pointer" }}>
-                    {uploading ? "Uploading…" : "Attach file(s)"}
-                    <input
-                      type="file"
-                      multiple
-                      style={{ display: "none" }}
-                      onChange={(e) => uploadFiles(e, i)}
-                      disabled={uploading}
-                    />
-                  </label>
-                </div>
-              )}
+              {it.type === "project_video" &&
+                renderFileAttach(
+                  it,
+                  i,
+                  "Attached files — templates, raw data, anything students download to start. The label is what they see on the button."
+                )}
 
               {/* Solution walkthrough links — videos, and Projects (gated
                   server-side until the student submits). */}
@@ -696,14 +712,19 @@ export default function BootcampBuilder({ id }) {
                     />
                   </div>
 
-                  <div className="note" style={{ marginBottom: 2 }}>
-                    Shared resource links — stay visible on every step (e.g. Template + full
-                    Solution).
+                  {renderFileAttach(
+                    it,
+                    i,
+                    "Shared files — pinned above every step (e.g. model template, full solution workbook)."
+                  )}
+
+                  <div className="note" style={{ margin: "14px 0 2px" }}>
+                    Shared links (optional) — for anything hosted elsewhere rather than uploaded.
                   </div>
                   {renderLinkRepeater(it, i, {
-                    labelPlaceholder: "Resource label, e.g. DCF Template (Excel)",
+                    labelPlaceholder: "Resource label",
                     urlPlaceholder: "Resource link",
-                    addLabel: "+ Add shared resource link",
+                    addLabel: "+ Add shared link",
                   })}
 
                   <div className="hr" style={{ margin: "14px 0 10px" }} />

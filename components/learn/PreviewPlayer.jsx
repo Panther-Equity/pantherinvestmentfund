@@ -526,6 +526,16 @@ export default function PreviewPlayer({ bootcampId }) {
           </div>
         ) : null}
 
+        {(it.files || []).length ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
+            {(it.files || []).map((f) => (
+              <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+                ↓ {f.label || f.path.split("/").pop()}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         {it.solutions && it.solutions.length ? (
           <div style={{ margin: "6px 0 12px" }}>
             {it.solutions.map((r) =>
