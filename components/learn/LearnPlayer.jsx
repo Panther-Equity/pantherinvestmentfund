@@ -630,37 +630,31 @@ export default function LearnPlayer({ bootcampId }) {
   }
 
   // @feature: project-submit-gate-v1
-  // Upload the student's work, record the submission, then re-fetch this item's
+  // Confirming an attempt writes the submission row, then re-fetches this item's
   // solutions. That re-fetch is the whole mechanism: item_solutions has a
-  // RESTRICTIVE policy that returns zero rows for an unsubmitted Project, so
-  // before this moment the solution links genuinely aren't in the client at all.
-  async function submitProject(e, it) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // RESTRICTIVE policy returning zero rows for an unconfirmed Project, so until
+  // this moment the solution links genuinely aren't in the client at all.
+  //
+  // No file is collected — deliberately. Nobody reviews submissions, so a file
+  // would verify nothing a click doesn't, while costing real storage. The row is
+  // the record; the friction is the point.
+  async function confirmAttempt(it) {
     setSubmitBusy(it.id);
     setSubmitError("");
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      const path = `${user.id}/${it.id}/${file.name}`;
-      const { error: ue } = await supabase.storage
-        .from("submissions")
-        .upload(path, file, { upsert: true });
-      if (ue) throw ue;
-
       const row = {
         enrollment_id: enr.id,
         item_id: it.id,
-        path,
-        filename: file.name,
         submitted_at: new Date().toISOString(),
       };
       const { error: re } = await supabase
         .from("project_submissions")
         .upsert(row, { onConflict: "enrollment_id,item_id" });
       if (re) throw re;
-      setSubmissions((prev) => ({ ...prev, [it.id]: { ...row, unlocked_by_staff: false } }));
+      setSubmissions((prev) => ({
+        ...prev,
+        [it.id]: { ...row, path: null, filename: null, unlocked_by_staff: false },
+      }));
 
       const { data: sols } = await supabase
         .from("item_solutions")
@@ -669,10 +663,9 @@ export default function LearnPlayer({ bootcampId }) {
         .order("position");
       setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, solutions: sols || [] } : x)));
     } catch (err) {
-      setSubmitError(err?.message || "Submission failed. Try again.");
+      setSubmitError(err?.message || "Something went wrong. Try again.");
     } finally {
       setSubmitBusy(null);
-      e.target.value = "";
     }
   }
 
@@ -708,42 +701,28 @@ export default function LearnPlayer({ bootcampId }) {
             background: "var(--wash)",
           }}
         >
-          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Your submission</div>
-          {sub && sub.submitted_at ? (
-            <>
-              <p className="note" style={{ marginBottom: 12 }}>
-                Submitted {new Date(sub.submitted_at).toLocaleDateString()}
-                {sub.filename ? ` · ${sub.filename}` : ""}
-              </p>
-              <label className="btn ghost sm" style={{ cursor: "pointer" }}>
-                {submitBusy === it.id ? "Uploading…" : "Replace submission"}
-                <input
-                  type="file"
-                  style={{ display: "none" }}
-                  onChange={(e) => submitProject(e, it)}
-                  disabled={submitBusy === it.id}
-                />
-              </label>
-            </>
-          ) : sub && sub.unlocked_by_staff ? (
+          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Solution walkthrough</div>
+          {unlocked ? (
             <p className="note" style={{ marginBottom: 0 }}>
-              Unlocked by staff — no submission needed.
+              Unlocked
+              {sub && sub.submitted_at
+                ? ` · you confirmed your attempt on ${new Date(sub.submitted_at).toLocaleDateString()}`
+                : " by staff"}
+              .
             </p>
           ) : (
             <>
               <p className="note" style={{ marginBottom: 12, maxWidth: 520 }}>
-                Upload your completed file to submit. The solution walkthrough unlocks once you do —
-                give it your own attempt first.
+                Build it yourself first — you&rsquo;ll get far more out of this than from watching
+                the walkthrough cold. Confirm below once you&rsquo;ve finished your attempt.
               </p>
-              <label className="btn pri sm" style={{ cursor: "pointer" }}>
-                {submitBusy === it.id ? "Uploading…" : "Submit your project"}
-                <input
-                  type="file"
-                  style={{ display: "none" }}
-                  onChange={(e) => submitProject(e, it)}
-                  disabled={submitBusy === it.id}
-                />
-              </label>
+              <button
+                className="btn pri sm"
+                onClick={() => confirmAttempt(it)}
+                disabled={submitBusy === it.id}
+              >
+                {submitBusy === it.id ? "Unlocking…" : "I've completed my attempt"}
+              </button>
             </>
           )}
           {submitError ? (

@@ -478,14 +478,14 @@ export default function PreviewPlayer({ bootcampId }) {
             background: "var(--wash)",
           }}
         >
-          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Your submission</div>
+          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Solution walkthrough</div>
           <p className="note" style={{ marginBottom: 12, maxWidth: 520 }}>
-            Students upload their completed file here. Doing so unlocks the solution walkthrough
-            below — it is withheld at the database level until they submit, so it can&rsquo;t be
-            found by digging around the page.
+            Students confirm they&rsquo;ve attempted the build here, which unlocks the walkthrough
+            below. It&rsquo;s withheld at the database level until they do, so it can&rsquo;t be
+            found by digging around the page. Nothing is uploaded and nothing needs reviewing.
           </p>
           <button className="btn pri sm" disabled title="Disabled in preview">
-            Submit your project
+            I&rsquo;ve completed my attempt
           </button>
         </div>
 
