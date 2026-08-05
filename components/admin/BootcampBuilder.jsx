@@ -147,7 +147,7 @@ export default function BootcampBuilder({ id }) {
         // @feature: project-files-v1
         files: files
           .filter((f) => f.item_id === it.id)
-          .map((f) => ({ id: f.id, label: f.label || "", path: f.path })),
+          .map((f) => ({ id: f.id, label: f.label || "", path: f.path, gated: !!f.gated })),
         questions: qs
           .filter((q) => q.item_id === it.id)
           .map((q) => ({
@@ -284,7 +284,7 @@ export default function BootcampBuilder({ id }) {
         setError(`Upload failed for ${file.name}: ${ue.message}`);
         return;
       }
-      added.push({ id: crypto.randomUUID(), label: file.name, path });
+      added.push({ id: crypto.randomUUID(), label: file.name, path, gated: false });
     }
     setUploading(false);
     setItems((arr) =>
@@ -378,9 +378,16 @@ export default function BootcampBuilder({ id }) {
               sRows.push({ item_id: it.id, title: s.title, url: s.url, position: si })
             );
           // @feature: project-files-v1 — Projects and video series both carry files.
+          // @feature: gated-files-v1 — `gated` hides the row until confirmation.
           if (it.type === "project_video" || it.type === "video_series")
             (it.files || []).forEach((f, fi) =>
-              fRows.push({ item_id: it.id, position: fi, label: f.label || "", path: f.path })
+              fRows.push({
+                item_id: it.id,
+                position: fi,
+                label: f.label || "",
+                path: f.path,
+                gated: it.type === "project_video" ? !!f.gated : false,
+              })
             );
         });
         if (qRows.length) {
@@ -447,7 +454,10 @@ export default function BootcampBuilder({ id }) {
   // Shared file-attach block. Used by Project items and by video series (where
   // the files stay pinned above every step). Uploads land in the `workbooks`
   // bucket; students download via a signed URL.
-  const renderFileAttach = (it, i, hint) => (
+  // @feature: gated-files-v1 — allowGate shows a per-file Gated checkbox. Only
+  // passed for Projects, since they're the only item type with a confirmation
+  // step; a gated file anywhere else would never become visible.
+  const renderFileAttach = (it, i, hint, allowGate) => (
     <div style={{ marginTop: 10 }}>
       <div className="note" style={{ marginBottom: 6 }}>
         {hint}
@@ -473,6 +483,27 @@ export default function BootcampBuilder({ id }) {
           >
             {f.path.split("/").pop()}
           </span>
+          {allowGate ? (
+            <label
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 12,
+                whiteSpace: "nowrap",
+                alignSelf: "center",
+                cursor: "pointer",
+              }}
+              title="Hide this file until the student confirms their attempt"
+            >
+              <input
+                type="checkbox"
+                checked={!!f.gated}
+                onChange={(e) => updFile(i, fi, { gated: e.target.checked })}
+              />
+              Gated
+            </label>
+          ) : null}
           <button className="iconbtn" title="Move up" onClick={() => moveFile(i, fi, -1)}>
             ↑
           </button>
@@ -681,8 +712,21 @@ export default function BootcampBuilder({ id }) {
                 renderFileAttach(
                   it,
                   i,
-                  "Attached files — templates, raw data, anything students download to start. The label is what they see on the button."
+                  "Attached files — templates, raw data, anything students download to start. Tick Gated on a solution file to hide it until they confirm their attempt.",
+                  true
                 )}
+
+              {/* @feature: gated-files-v1 — authoring-time warning. Without this,
+                  a Project with no gated content shows students a confirm button
+                  that unlocks an empty section, and nothing surfaces the mistake. */}
+              {it.type === "project_video" &&
+              !(it.files || []).some((f) => f.gated) &&
+              !(it.solutions || []).some((s) => s.url) ? (
+                <div className="notice error" style={{ marginTop: 10, fontSize: 13 }}>
+                  Nothing is gated on this project, so the confirm button will unlock an empty
+                  section. Tick Gated on a solution file, or add a solution video link below.
+                </div>
+              ) : null}
 
               {/* Solution walkthrough links — videos, and Projects (gated
                   server-side until the student submits). */}

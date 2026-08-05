@@ -450,7 +450,8 @@ export default function PreviewPlayer({ bootcampId }) {
   // even though a student wouldn't see them pre-submission: the item_solutions
   // gate exempts staff, which is deliberate so you can check your own links.
   function renderProject(it, done) {
-    const files = it.files || [];
+    const resources = (it.files || []).filter((f) => !f.gated);
+    const gatedFiles = (it.files || []).filter((f) => f.gated);
     return (
       <>
         {it.intro_text ? (
@@ -459,9 +460,9 @@ export default function PreviewPlayer({ bootcampId }) {
           </div>
         ) : null}
 
-        {files.length ? (
+        {resources.length ? (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
-            {files.map((f) => (
+            {resources.map((f) => (
               <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
                 ↓ {f.label || f.path.split("/").pop()}
               </button>
@@ -489,12 +490,21 @@ export default function PreviewPlayer({ bootcampId }) {
           </button>
         </div>
 
-        {it.solutions && it.solutions.length ? (
+        {gatedFiles.length || (it.solutions && it.solutions.length) ? (
           <div style={{ margin: "14px 0 4px" }}>
-            <div className="note" style={{ marginBottom: 4 }}>
-              Visible to you as staff · students see this only after submitting
+            <div className="note" style={{ marginBottom: 6 }}>
+              Visible to you as staff · students see this only after confirming
             </div>
-            {it.solutions.map((s) =>
+            {gatedFiles.length ? (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+                {gatedFiles.map((f) => (
+                  <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+                    ↓ {f.label || f.path.split("/").pop()}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {(it.solutions || []).map((s) =>
               s.url ? (
                 <a key={s.id} className="sol-link" href={s.url} target="_blank" rel="noreferrer">
                   ▸ {s.title || "Solution walkthrough"}
@@ -502,7 +512,12 @@ export default function PreviewPlayer({ bootcampId }) {
               ) : null
             )}
           </div>
-        ) : null}
+        ) : (
+          <div className="notice error" style={{ marginTop: 14, fontSize: 13 }}>
+            Nothing is gated on this project, so confirming would unlock an empty section. Attach a
+            solution file and tick Gated in the builder, or add a solution video link.
+          </div>
+        )}
 
         <div className="complete-row" onClick={() => toggleComplete(it)}>
           <span className={`check ${done ? "on" : ""}`}>{done ? "✓" : ""}</span>

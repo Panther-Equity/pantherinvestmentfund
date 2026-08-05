@@ -656,12 +656,13 @@ export default function LearnPlayer({ bootcampId }) {
         [it.id]: { ...row, path: null, filename: null, unlocked_by_staff: false },
       }));
 
-      const { data: sols } = await supabase
-        .from("item_solutions")
-        .select("*")
-        .eq("item_id", it.id)
-        .order("position");
-      setItems((prev) => prev.map((x) => (x.id === it.id ? { ...x, solutions: sols || [] } : x)));
+      const [{ data: sols }, { data: fls }] = await Promise.all([
+        supabase.from("item_solutions").select("*").eq("item_id", it.id).order("position"),
+        supabase.from("item_files").select("*").eq("item_id", it.id).order("position"),
+      ]);
+      setItems((prev) =>
+        prev.map((x) => (x.id === it.id ? { ...x, solutions: sols || [], files: fls || [] } : x))
+      );
     } catch (err) {
       setSubmitError(err?.message || "Something went wrong. Try again.");
     } finally {
@@ -673,7 +674,11 @@ export default function LearnPlayer({ bootcampId }) {
   function renderProject(it, done) {
     const sub = submissions[it.id];
     const unlocked = !!sub && (!!sub.submitted_at || !!sub.unlocked_by_staff);
-    const files = it.files || [];
+    // @feature: gated-files-v1 — gated rows aren't even returned by the API until
+    // the student confirms, so this split is presentational: resources sit above,
+    // anything gated appears in the solution block once it arrives.
+    const resources = (it.files || []).filter((f) => !f.gated);
+    const gatedFiles = (it.files || []).filter((f) => f.gated);
     return (
       <>
         {it.intro_text ? (
@@ -682,9 +687,9 @@ export default function LearnPlayer({ bootcampId }) {
           </div>
         ) : null}
 
-        {files.length ? (
+        {resources.length ? (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
-            {files.map((f) => (
+            {resources.map((f) => (
               <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
                 ↓ {f.label || f.path.split("/").pop()}
               </button>
@@ -733,9 +738,22 @@ export default function LearnPlayer({ bootcampId }) {
         </div>
 
         {unlocked ? (
-          it.solutions && it.solutions.length ? (
+          gatedFiles.length || (it.solutions && it.solutions.length) ? (
             <div style={{ margin: "14px 0 4px" }}>
-              {it.solutions.map((s) =>
+              {gatedFiles.length ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+                  {gatedFiles.map((f) => (
+                    <button
+                      key={f.id}
+                      className="btn ghost sm"
+                      onClick={() => downloadFile(f.path)}
+                    >
+                      ↓ {f.label || f.path.split("/").pop()}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {(it.solutions || []).map((s) =>
                 s.url ? (
                   <a key={s.id} className="sol-link" href={s.url} target="_blank" rel="noreferrer">
                     ▸ {s.title || "Solution walkthrough"}
@@ -743,10 +761,14 @@ export default function LearnPlayer({ bootcampId }) {
                 ) : null
               )}
             </div>
-          ) : null
+          ) : (
+            <p className="note" style={{ margin: "14px 0 4px" }}>
+              Nothing has been posted here yet. Check back.
+            </p>
+          )
         ) : (
           <p className="note" style={{ margin: "14px 0 4px" }}>
-            🔒 Solution walkthrough unlocks after you submit.
+            🔒 The solution unlocks after you confirm your attempt.
           </p>
         )}
 
