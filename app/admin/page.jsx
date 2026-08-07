@@ -1,14 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { createClient } from "@/utils/supabase/client";
 
+// @feature: dashboard-grouped-by-person-v1
+// The table groups one row per person; the underlying data stays per-enrollment
+// (one row per person × bootcamp) so filters, the stat strip, and the CSV
+// export all keep full granularity. Click a name to drill into their
+// per-bootcamp breakdown on the People detail page.
 const COLUMNS = [
   { k: "name", label: "Name" },
-  { k: "bootcamp", label: "Bootcamp" },
+  { k: "bootcamps", label: "Bootcamps" },
   { k: "cohort", label: "Cohort" },
   { k: "pct", label: "Progress" },
-  { k: "timePct", label: "Time %", filterable: false }, // @feature: time-based-progress-v1
   { k: "deadline", label: "Deadline" },
 ];
 
@@ -49,11 +54,14 @@ export default function AdminDashboardPage() {
     const timeProg = timeProgRes.data || [];
     // time_pct is null when nothing in the bootcamp has a known time budget yet
     // (e.g. no video durations captured, no timed knowledge checks) — kept as
-    // null rather than 0 so the UI can show "—" instead of a misleading 0%.
+    // null rather than 0 so a missing budget never reads as a real 0%.
+    // No longer shown in the table (dropped 2026-08-07 — not useful at a
+    // glance); still carried through to the CSV export.
     const tpmap = Object.fromEntries(timeProg.map((p) => [p.enrollment_id, p.time_pct]));
 
     const built = enr.map((e) => ({
       id: e.id,
+      userId: e.user_id,
       name: e.profiles?.full_name || e.profiles?.email || "—",
       email: e.profiles?.email || "",
       bootcamp: e.bootcamps?.name || "—",
@@ -92,7 +100,7 @@ export default function AdminDashboardPage() {
   function colFiltered(key) {
     return (
       (key === "name" && !!fName) ||
-      (key === "bootcamp" && !!fBootcamp) ||
+      (key === "bootcamps" && !!fBootcamp) ||
       (key === "cohort" && !!fCohort) ||
       (key === "pct" && !!fProgress) ||
       (key === "deadline" && !!fDeadline)
@@ -104,6 +112,9 @@ export default function AdminDashboardPage() {
     setSortDir(dir);
   }
 
+  // Enrollment-level rows after filters. Everything downstream — the grouped
+  // table, the stat strip, and the CSV — derives from this, so a filter means
+  // the same thing everywhere.
   const filtered = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
     const q = fName.trim().toLowerCase();
@@ -121,37 +132,71 @@ export default function AdminDashboardPage() {
     });
   }, [data, fName, fBootcamp, fCohort, fProgress, fDeadline]);
 
-  const sorted = useMemo(() => {
-    const rows = [...filtered];
-    const dir = sortDir === "asc" ? 1 : -1;
-    rows.sort((a, b) => {
-      if (sortKey === "pct") return (a.pct - b.pct) * dir;
-      if (sortKey === "timePct") {
-        // nulls (no time budget known yet) sort last regardless of direction
-        if (a.timePct == null && b.timePct == null) return 0;
-        if (a.timePct == null) return 1;
-        if (b.timePct == null) return -1;
-        return (a.timePct - b.timePct) * dir;
+  // One entry per person, aggregated from their (filtered) enrollments.
+  const groups = useMemo(() => {
+    const map = new Map();
+    filtered.forEach((r) => {
+      if (!map.has(r.userId)) {
+        map.set(r.userId, { userId: r.userId, name: r.name, email: r.email, rows: [] });
       }
+      map.get(r.userId).rows.push(r);
+    });
+    return [...map.values()].map((g) => {
+      const rows = g.rows;
+      const cohorts = [...new Set(rows.map((r) => r.cohort))];
+      const deadlines = [...new Set(rows.map((r) => r.deadline).filter(Boolean))].sort();
+      return {
+        userId: g.userId,
+        name: g.name,
+        email: g.email,
+        count: rows.length,
+        bootcampList: rows
+          .map((r) => r.bootcamp)
+          .sort((a, b) => a.localeCompare(b))
+          .join(", "),
+        // Cohort only shown when unambiguous — a person spanning two cohorts
+        // gets a dash rather than an arbitrary pick.
+        cohort: cohorts.length === 1 ? cohorts[0] : "—",
+        // Simple (unweighted) mean of their per-bootcamp completion.
+        pct: Math.round(rows.reduce((s, r) => s + r.pct, 0) / rows.length),
+        // Earliest deadline drives both display and sort; "+n" flags that more
+        // exist, so it never reads as a single shared date.
+        deadline: deadlines[0] || null,
+        extraDeadlines: Math.max(0, deadlines.length - 1),
+      };
+    });
+  }, [filtered]);
+
+  const sortedGroups = useMemo(() => {
+    const rows = [...groups];
+    const dir = sortDir === "asc" ? 1 : -1;
+    const nameCmp = (a, b) => a.name.localeCompare(b.name);
+    rows.sort((a, b) => {
+      if (sortKey === "pct") return (a.pct - b.pct) * dir || nameCmp(a, b);
+      if (sortKey === "bootcamps") return (a.count - b.count) * dir || nameCmp(a, b);
+      if (sortKey === "cohort") return String(a.cohort).localeCompare(String(b.cohort)) * dir || nameCmp(a, b);
       if (sortKey === "deadline") {
         const av = a.deadline || "";
         const bv = b.deadline || "";
-        if (!av && !bv) return 0;
+        if (!av && !bv) return nameCmp(a, b);
         if (!av) return 1;
         if (!bv) return -1;
-        return av < bv ? -dir : av > bv ? dir : 0;
+        return av < bv ? -dir : av > bv ? dir : nameCmp(a, b);
       }
-      const av = String(a[sortKey] ?? "");
-      const bv = String(b[sortKey] ?? "");
-      return av.localeCompare(bv) * dir;
+      return nameCmp(a, b) * dir;
     });
     return rows;
-  }, [filtered, sortKey, sortDir]);
+  }, [groups, sortKey, sortDir]);
 
+  const totalPeople = useMemo(() => new Set((data || []).map((r) => r.userId)).size, [data]);
+
+  // Stat strip stays enrollment-level: "not started" / "finished" count
+  // assignments, not people, since one person can be done with one bootcamp and
+  // untouched on another.
   const stats = useMemo(() => {
     const rows = filtered;
     const n = rows.length;
-    const people = new Set(rows.map((r) => r.email)).size;
+    const people = new Set(rows.map((r) => r.userId)).size;
     const notStarted = rows.filter((r) => r.pct === 0).length;
     const finished = rows.filter((r) => r.pct >= 100).length;
     const avg = n ? Math.round(rows.reduce((s, r) => s + r.pct, 0) / n) : 0;
@@ -173,10 +218,16 @@ export default function AdminDashboardPage() {
     return `hsl(${hue}, 65%, 45%)`;
   }
 
+  // Deliberately exports the ungrouped, enrollment-level rows — one line per
+  // person × bootcamp. The grouping above is a display convenience; the export
+  // is for real work downstream, so it keeps every row.
   function exportCsv() {
+    const rows = [...filtered].sort(
+      (a, b) => a.name.localeCompare(b.name) || a.bootcamp.localeCompare(b.bootcamp)
+    );
     const head = ["Name", "Email", "Bootcamp", "Cohort", "Progress %", "Time %", "Deadline"];
     const lines = [head.join(",")];
-    sorted.forEach((r) => {
+    rows.forEach((r) => {
       const cells = [r.name, r.email, r.bootcamp, r.cohort, r.pct, r.timePct ?? "", r.deadline || ""];
       lines.push(cells.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","));
     });
@@ -193,7 +244,8 @@ export default function AdminDashboardPage() {
   }
 
   function sortLabels(key) {
-    if (key === "pct" || key === "timePct") return ["Lowest first", "Highest first"];
+    if (key === "pct") return ["Lowest first", "Highest first"];
+    if (key === "bootcamps") return ["Fewest first", "Most first"];
     if (key === "deadline") return ["Earliest first", "Latest first"];
     return ["A → Z", "Z → A"];
   }
@@ -226,7 +278,7 @@ export default function AdminDashboardPage() {
         />
       );
     }
-    if (key === "bootcamp") {
+    if (key === "bootcamps") {
       return (
         <OptionList
           current={fBootcamp}
@@ -311,6 +363,10 @@ export default function AdminDashboardPage() {
       <div className="eyebrow">Dashboard</div>
       <h1 className="h1">Progress</h1>
       <div className="sub">Who&rsquo;s been assigned what and how far they&rsquo;ve gotten.</div>
+      <div className="note" style={{ marginBottom: 16, maxWidth: 720 }}>
+        One row per person — progress is the average across their bootcamps. Click a name for the
+        per-bootcamp breakdown. <strong>Export CSV</strong> gives one row per bootcamp, not per person.
+      </div>
 
       {err && <div className="notice error">{err}</div>}
 
@@ -335,7 +391,7 @@ export default function AdminDashboardPage() {
 
       <div className="toolbar">
         <span className="note">
-          Showing {sorted.length} of {(data || []).length}
+          Showing {sortedGroups.length} of {totalPeople} people · {filtered.length} of {(data || []).length} assignments
           {anyFilter ? (
             <>
               {" · "}
@@ -343,7 +399,7 @@ export default function AdminDashboardPage() {
             </>
           ) : null}
         </span>
-        <button className="btn ghost" onClick={exportCsv} disabled={!sorted.length}>Export CSV</button>
+        <button className="btn ghost" onClick={exportCsv} disabled={!filtered.length}>Export CSV</button>
       </div>
 
       {(data || []).length === 0 ? (
@@ -375,29 +431,46 @@ export default function AdminDashboardPage() {
               </tr>
             </thead>
             <tbody>
-              {sorted.length === 0 ? (
+              {sortedGroups.length === 0 ? (
                 <tr>
                   <td colSpan={COLUMNS.length} className="dt-empty">No rows match your filters.</td>
                 </tr>
               ) : (
-                sorted.map((r) => (
-                  <tr key={r.id}>
+                sortedGroups.map((g) => (
+                  <tr key={g.userId}>
                     <td>
-                      <div className="dt-name">{r.name}</div>
-                      <div className="dt-mail">{r.email}</div>
+                      <Link
+                        href={`/admin/people/${g.userId}`}
+                        title="View per-bootcamp progress"
+                        style={{ color: "inherit", textDecoration: "none" }}
+                      >
+                        <span className="dt-name" style={{ display: "block" }}>{g.name}</span>
+                      </Link>
+                      <div className="dt-mail">{g.email}</div>
                     </td>
-                    <td>{r.bootcamp}</td>
-                    <td>{r.cohort}</td>
+                    <td>
+                      {g.count === 1 ? (
+                        g.bootcampList
+                      ) : (
+                        <>
+                          <div>{g.count} bootcamps</div>
+                          <div className="dt-mail">{g.bootcampList}</div>
+                        </>
+                      )}
+                    </td>
+                    <td>{g.cohort}</td>
                     <td>
                       <div className="prog">
                         <span className="minibar">
-                          <span className="minibar-fill" style={{ width: `${r.pct}%`, background: progressColor(r.pct) }} />
+                          <span className="minibar-fill" style={{ width: `${g.pct}%`, background: progressColor(g.pct) }} />
                         </span>
-                        <span className="prog-pct">{r.pct}%</span>
+                        <span className="prog-pct">{g.pct}%</span>
                       </div>
                     </td>
-                    <td className="note">{r.timePct == null ? "—" : `${r.timePct}%`}</td>
-                    <td className="dt-deadline">{fmtDeadline(r.deadline)}</td>
+                    <td className="dt-deadline">
+                      {fmtDeadline(g.deadline)}
+                      {g.extraDeadlines > 0 && <span className="note"> +{g.extraDeadlines}</span>}
+                    </td>
                   </tr>
                 ))
               )}

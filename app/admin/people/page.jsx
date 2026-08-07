@@ -335,6 +335,10 @@ export default function PeoplePage() {
       <div className="eyebrow">People</div>
       <h1 className="h1">Roster</h1>
       <div className="sub">Invite analysts by creating a private invite link, and manage who&rsquo;s an admin.</div>
+      <div className="note" style={{ marginBottom: 16, maxWidth: 720 }}>
+        Click a name to view their per-bootcamp progress and unassign them from individual bootcamps.{" "}
+        <strong>Remove</strong> (right) deletes the whole account and every enrollment — there&rsquo;s no undo.
+      </div>
 
       {err && <div className="notice error" style={{ maxWidth: 720 }}>{err}</div>}
       {msg && <div className="notice ok" style={{ maxWidth: 720 }}>{msg}</div>}
