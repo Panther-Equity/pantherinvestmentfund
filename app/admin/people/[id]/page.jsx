@@ -33,6 +33,9 @@ export default function LearnerDetailPage() {
   const [acting, setActing] = useState(false);
   const [unErr, setUnErr] = useState("");
 
+  // @feature: quiz-per-question-review-v1 — which knowledge-check rows are expanded
+  const [expandedQuiz, setExpandedQuiz] = useState(new Set());
+
   const load = useCallback(async () => {
     setLoading(true);
 
@@ -58,8 +61,10 @@ export default function LearnerDetailPage() {
     const enrollmentIds = enrollments.map((e) => e.id);
 
     let items = [],
+      questions = [], // @feature: quiz-per-question-review-v1
       comps = [],
       scores = [],
+      responses = [], // @feature: quiz-per-question-review-v1
       timeProg = []; // @feature: time-based-progress-v1
     if (bootcampIds.length) {
       const { data: its } = await supabase
@@ -68,13 +73,28 @@ export default function LearnerDetailPage() {
         .in("bootcamp_id", bootcampIds)
         .order("position");
       items = its || [];
+      const itemIds = items.map((i) => i.id);
+      if (itemIds.length) {
+        // @feature: quiz-per-question-review-v1 — prompts/options/answer key,
+        // fetched regardless of item type; only knowledge_check rows will match.
+        const { data: qs } = await supabase
+          .from("questions")
+          .select("id, item_id, prompt, options, answer_index, position")
+          .in("item_id", itemIds)
+          .order("position");
+        questions = qs || [];
+      }
     }
     if (enrollmentIds.length) {
-      const [{ data: c }, { data: s }, { data: tp }] = await Promise.all([
+      const [{ data: c }, { data: s }, { data: rs }, { data: tp }] = await Promise.all([
         supabase.from("completions").select("enrollment_id, item_id").in("enrollment_id", enrollmentIds),
         supabase
           .from("quiz_scores")
           .select("enrollment_id, item_id, score, total")
+          .in("enrollment_id", enrollmentIds),
+        supabase
+          .from("quiz_responses") // @feature: quiz-per-question-review-v1
+          .select("enrollment_id, item_id, question_id, selected_index, correct")
           .in("enrollment_id", enrollmentIds),
         supabase
           .from("enrollment_time_progress") // @feature: time-based-progress-v1
@@ -83,6 +103,7 @@ export default function LearnerDetailPage() {
       ]);
       comps = c || [];
       scores = s || [];
+      responses = rs || []; // @feature: quiz-per-question-review-v1
       timeProg = tp || [];
     }
 
@@ -96,6 +117,14 @@ export default function LearnerDetailPage() {
           .filter((s) => s.enrollment_id === e.id)
           .map((s) => [s.item_id, { score: s.score, total: s.total }])
       );
+      // @feature: quiz-per-question-review-v1 — this enrollment's responses,
+      // grouped by item so each knowledge check looks up only its own picks.
+      const responsesByItem = {};
+      responses
+        .filter((r) => r.enrollment_id === e.id)
+        .forEach((r) => {
+          (responsesByItem[r.item_id] = responsesByItem[r.item_id] || []).push(r);
+        });
       const totalW = its.reduce((sum, i) => sum + (i.weight || 1), 0);
       const doneW = its.filter((i) => compSet.has(i.id)).reduce((sum, i) => sum + (i.weight || 1), 0);
       const pct = totalW ? Math.round((100 * doneW) / totalW) : 0;
@@ -111,13 +140,26 @@ export default function LearnerDetailPage() {
         timePct: rawTimePct == null ? null : Math.round(rawTimePct), // @feature: time-based-progress-v1
         doneCount,
         total: its.length,
-        items: its.map((i) => ({
-          id: i.id,
-          title: i.title,
-          type: i.type,
-          done: compSet.has(i.id),
-          score: scoreMap[i.id] || null,
-        })),
+        items: its.map((i) => {
+          // @feature: quiz-per-question-review-v1
+          const itemQuestions = questions.filter((q) => q.item_id === i.id);
+          const itemResponses = responsesByItem[i.id] || [];
+          const responseMap = Object.fromEntries(itemResponses.map((r) => [r.question_id, r]));
+          return {
+            id: i.id,
+            title: i.title,
+            type: i.type,
+            done: compSet.has(i.id),
+            score: scoreMap[i.id] || null,
+            questions:
+              i.type === "knowledge_check"
+                ? itemQuestions.map((q) => ({ ...q, response: responseMap[q.id] || null }))
+                : [],
+            // Per-question rows only exist for attempts submitted after this
+            // feature shipped — an older completion has a score but nothing here.
+            hasResponseDetail: i.type === "knowledge_check" && itemQuestions.length > 0 && itemResponses.length > 0,
+          };
+        }),
       };
     });
     assembled.sort(
@@ -165,6 +207,16 @@ export default function LearnerDetailPage() {
     setRows((prev) => prev.map((r) => (r.id === eid ? { ...r, deadline: newVal } : r)));
     setEditId(null);
     setEditVal("");
+  }
+
+  // @feature: quiz-per-question-review-v1
+  function toggleQuizExpand(itemId) {
+    setExpandedQuiz((prev) => {
+      const n = new Set(prev);
+      if (n.has(itemId)) n.delete(itemId);
+      else n.add(itemId);
+      return n;
+    });
   }
 
   // v3: unassign (hard delete; children cascade)
@@ -306,53 +358,112 @@ export default function LearnerDetailPage() {
                 {r.items.length === 0 ? (
                   <div className="note">No content in this bootcamp yet.</div>
                 ) : (
-                  r.items.map((it, idx) => (
-                    <div
-                      key={it.id}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 10,
-                        padding: "9px 0",
-                        borderTop: idx ? "1px solid var(--line)" : "none",
-                      }}
-                    >
-                      <span
-                        style={
-                          it.done
-                            ? {
-                                width: 18,
-                                height: 18,
-                                borderRadius: "50%",
-                                background: "var(--ok)",
-                                color: "#fff",
-                                display: "inline-flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                fontSize: 11,
-                                flexShrink: 0,
-                              }
-                            : {
-                                width: 18,
-                                height: 18,
-                                borderRadius: "50%",
-                                border: "1.5px solid var(--line-d)",
-                                flexShrink: 0,
-                              }
-                        }
-                      >
-                        {it.done ? "✓" : ""}
-                      </span>
-                      <span style={{ flex: 1, fontSize: 14 }}>{it.title}</span>
-                      <span className="note" style={{ whiteSpace: "nowrap" }}>
-                        {it.type === "knowledge_check"
-                          ? it.score
-                            ? `Quiz · ${it.score.score}/${it.score.total}`
-                            : "Quiz"
-                          : kindLabel(it.type)}
-                      </span>
-                    </div>
-                  ))
+                  r.items.map((it, idx) => {
+                    // @feature: quiz-per-question-review-v1
+                    const isQuiz = it.type === "knowledge_check";
+                    const canExpand = isQuiz && !!it.score;
+                    const isOpen = expandedQuiz.has(it.id);
+                    return (
+                      <div key={it.id} style={{ borderTop: idx ? "1px solid var(--line)" : "none" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0" }}>
+                          <span
+                            style={
+                              it.done
+                                ? {
+                                    width: 18,
+                                    height: 18,
+                                    borderRadius: "50%",
+                                    background: "var(--ok)",
+                                    color: "#fff",
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    fontSize: 11,
+                                    flexShrink: 0,
+                                  }
+                                : {
+                                    width: 18,
+                                    height: 18,
+                                    borderRadius: "50%",
+                                    border: "1.5px solid var(--line-d)",
+                                    flexShrink: 0,
+                                  }
+                            }
+                          >
+                            {it.done ? "✓" : ""}
+                          </span>
+                          <span style={{ flex: 1, fontSize: 14 }}>{it.title}</span>
+                          <span className="note" style={{ whiteSpace: "nowrap" }}>
+                            {isQuiz
+                              ? it.score
+                                ? `Quiz · ${it.score.score}/${it.score.total}`
+                                : "Quiz"
+                              : kindLabel(it.type)}
+                          </span>
+                          {canExpand && (
+                            <button
+                              className="btn link sm"
+                              style={{ padding: "2px 4px", whiteSpace: "nowrap" }}
+                              onClick={() => toggleQuizExpand(it.id)}
+                            >
+                              {isOpen ? "Hide answers" : "Show answers"}
+                            </button>
+                          )}
+                        </div>
+                        {canExpand && isOpen && (
+                          <div style={{ padding: "0 0 14px 28px" }}>
+                            {!it.hasResponseDetail ? (
+                              <div className="note" style={{ fontSize: 12 }}>
+                                Per-question detail isn&rsquo;t available for this attempt — it was taken before
+                                this feature was added.
+                              </div>
+                            ) : (
+                              it.questions.map((q, qi) => {
+                                const picked = q.response?.selected_index;
+                                const wasCorrect = q.response?.correct;
+                                const leftBlank = picked == null || picked === -1;
+                                return (
+                                  <div
+                                    key={q.id}
+                                    style={{ marginBottom: qi < it.questions.length - 1 ? 14 : 0 }}
+                                  >
+                                    <div className="note" style={{ fontSize: 12, marginBottom: 4 }}>
+                                      Question {qi + 1} · {leftBlank ? "Left blank" : wasCorrect ? "Correct" : "Incorrect"}
+                                    </div>
+                                    <div style={{ fontSize: 13, marginBottom: 6, whiteSpace: "pre-wrap" }}>
+                                      {q.prompt}
+                                    </div>
+                                    {(q.options || []).map((opt, oi) => {
+                                      const isAnswer = oi === q.answer_index;
+                                      const isPicked = oi === picked;
+                                      let color = "var(--gray)";
+                                      let weight = 400;
+                                      if (isAnswer) {
+                                        color = "var(--ok)";
+                                        weight = 600;
+                                      } else if (isPicked && !wasCorrect) {
+                                        color = "var(--danger)";
+                                        weight = 600;
+                                      }
+                                      return (
+                                        <div
+                                          key={oi}
+                                          style={{ fontSize: 13, color, fontWeight: weight, padding: "2px 0" }}
+                                        >
+                                          {isAnswer ? "✓ " : isPicked ? "✗ " : "· "}
+                                          {opt}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
 
