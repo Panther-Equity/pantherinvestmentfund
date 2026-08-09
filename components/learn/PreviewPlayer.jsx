@@ -143,7 +143,7 @@ export default function PreviewPlayer({ bootcampId }) {
   const load = useCallback(async () => {
     const { data: b } = await supabase
       .from("bootcamps")
-      .select("id, name, audience, workbook_path")
+      .select("id, name, audience, workbook_path, description")
       .eq("id", bootcampId)
       .single();
     if (!b) {
@@ -777,6 +777,14 @@ export default function PreviewPlayer({ bootcampId }) {
             <div className="pbar-fill" style={{ width: `${pct}%` }} />
           </div>
           <div className="note" style={{ margin: "8px 0 0" }}>{pct}% complete</div>
+          {bc?.description ? (
+            <div
+              className="note"
+              style={{ whiteSpace: "pre-wrap", margin: "12px 0 0", maxWidth: 620, lineHeight: 1.55 }}
+            >
+              {bc.description}
+            </div>
+          ) : null}
         </div>
         {items.length === 0 ? (
           <div className="stub">No content in this bootcamp yet.</div>
@@ -906,6 +914,20 @@ export default function PreviewPlayer({ bootcampId }) {
           <div className="note" style={{ margin: "8px 0 12px" }}>
             {pct}% complete
           </div>
+          {bc?.description ? (
+            <div
+              className="note"
+              style={{
+                whiteSpace: "pre-wrap",
+                margin: "0 0 14px",
+                paddingBottom: 14,
+                borderBottom: "1px solid var(--line-d)",
+                lineHeight: 1.55,
+              }}
+            >
+              {bc.description}
+            </div>
+          ) : null}
           {bc?.workbook_path ? (
             <button className="btn ghost sm" style={{ width: "100%", marginBottom: 14 }} onClick={downloadWorkbook}>
               Download drill workbook

@@ -346,17 +346,17 @@ export default function BootcampBuilder({ id }) {
       if (e3) throw e3;
 
       // Rewrite questions, solutions, and files for the current items.
+      //
+      // @feature: stable-child-ids-v1 (2026-08-08)
+      // These three tables were previously delete-then-insert, which minted a
+      // fresh UUID for every row on every save. quiz_responses references
+      // questions.id, so each bootcamp save silently cascaded away every
+      // per-question response ever recorded. Every question, solution and file
+      // already carries a stable client-generated id (load() reads it from the
+      // DB; every add path mints one with crypto.randomUUID), so the fix is to
+      // stop discarding it: upsert by id, then sweep the rows the editor no
+      // longer holds. Mirrors the item_steps pattern below.
       if (itemIds.length) {
-        const { error: eqd } = await supabase.from("questions").delete().in("item_id", itemIds);
-        if (eqd) throw eqd;
-        const { error: esd } = await supabase
-          .from("item_solutions")
-          .delete()
-          .in("item_id", itemIds);
-        if (esd) throw esd;
-        const { error: efd } = await supabase.from("item_files").delete().in("item_id", itemIds);
-        if (efd) throw efd;
-
         const qRows = [];
         const sRows = [];
         const fRows = [];
@@ -364,6 +364,7 @@ export default function BootcampBuilder({ id }) {
           if (it.type === "knowledge_check")
             (it.questions || []).forEach((q, qi) =>
               qRows.push({
+                id: q.id || crypto.randomUUID(),
                 item_id: it.id,
                 prompt: q.prompt,
                 options: q.options,
@@ -375,13 +376,20 @@ export default function BootcampBuilder({ id }) {
           // walkthrough), and series (shared pinned resources).
           if (it.type === "video" || it.type === "project_video" || it.type === "video_series")
             (it.solutions || []).forEach((s, si) =>
-              sRows.push({ item_id: it.id, title: s.title, url: s.url, position: si })
+              sRows.push({
+                id: s.id || crypto.randomUUID(),
+                item_id: it.id,
+                title: s.title,
+                url: s.url,
+                position: si,
+              })
             );
           // @feature: project-files-v1 — Projects and video series both carry files.
           // @feature: gated-files-v1 — `gated` hides the row until confirmation.
           if (it.type === "project_video" || it.type === "video_series")
             (it.files || []).forEach((f, fi) =>
               fRows.push({
+                id: f.id || crypto.randomUUID(),
                 item_id: it.id,
                 position: fi,
                 label: f.label || "",
@@ -390,18 +398,31 @@ export default function BootcampBuilder({ id }) {
               })
             );
         });
+
         if (qRows.length) {
-          const { error: eq } = await supabase.from("questions").insert(qRows);
+          const { error: eq } = await supabase.from("questions").upsert(qRows);
           if (eq) throw eq;
         }
         if (sRows.length) {
-          const { error: es } = await supabase.from("item_solutions").insert(sRows);
+          const { error: es } = await supabase.from("item_solutions").upsert(sRows);
           if (es) throw es;
         }
         if (fRows.length) {
-          const { error: ef } = await supabase.from("item_files").insert(fRows);
+          const { error: ef } = await supabase.from("item_files").upsert(fRows);
           if (ef) throw ef;
         }
+
+        // Drop children the user removed in the editor. Guarded by the keep-list
+        // so a save can never delete a row that's still on screen.
+        const sweepChildren = async (table, keep) => {
+          let dq = supabase.from(table).delete().in("item_id", itemIds);
+          if (keep.length) dq = dq.not("id", "in", `(${keep.join(",")})`);
+          const { error: esw } = await dq;
+          if (esw) throw esw;
+        };
+        await sweepChildren("questions", qRows.map((r) => r.id));
+        await sweepChildren("item_solutions", sRows.map((r) => r.id));
+        await sweepChildren("item_files", fRows.map((r) => r.id));
       }
 
       // @feature: video-series-v1
