@@ -916,6 +916,11 @@ export default function LearnPlayer({ bootcampId }) {
       remainingMs = Math.max(0, deadline - nowTs);
     }
     const wp = watchPct(it);
+    // @feature: baseline-check-integrity-v1
+    // Per-item, defaulting open: a missing or null column (an older row, or a
+    // deploy where the migration hasn't run yet) behaves exactly as before.
+    const revealAnswers = it.reveal_answers !== false;
+    const allowRetake = it.allow_retake !== false;
     return (
       <div className="lesson">
         <div className="lesson-kind">{kindLong(it.type)}</div>
@@ -1030,7 +1035,10 @@ export default function LearnPlayer({ bootcampId }) {
                     <div className="qselect">Select one:</div>
                     {q.options.map((opt, oi) => {
                       let cls = "opt";
-                      if (res) {
+                      // @feature: baseline-check-integrity-v1 — a check with
+                      // reveal_answers false scores silently. Without this, one
+                      // blind submission hands over the complete key.
+                      if (res && revealAnswers) {
                         if (oi === q.answer_index) cls += " correct";
                         else if (myPick === oi) cls += " wrong";
                       } else if (myPick === oi) cls += " sel";
@@ -1047,11 +1055,16 @@ export default function LearnPlayer({ bootcampId }) {
               {res ? (
                 <>
                   <div className="scorebox">
-                    You scored {res.score} / {res.total}. Correct answers are highlighted in green.
+                    You scored {res.score} / {res.total}.
+                    {revealAnswers
+                      ? " Correct answers are highlighted in green."
+                      : " This one's a baseline check, so the answers aren't shown and it's taken once only."}
                   </div>
-                  <button className="btn ghost sm" style={{ marginTop: 10 }} onClick={() => retake(it)}>
-                    Retake
-                  </button>
+                  {allowRetake ? (
+                    <button className="btn ghost sm" style={{ marginTop: 10 }} onClick={() => retake(it)}>
+                      Retake
+                    </button>
+                  ) : null}
                 </>
               ) : (
                 <button
