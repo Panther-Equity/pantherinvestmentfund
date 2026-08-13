@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import TopBar from "@/components/TopBar";
 
@@ -6,6 +7,8 @@ export default async function LearnLayout({ children }) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
+
+  if (!user) redirect("/login");
 
   const { data: profile } = await supabase
     .from("profiles")
