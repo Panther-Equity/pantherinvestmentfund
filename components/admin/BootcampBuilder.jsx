@@ -70,10 +70,15 @@ export default function BootcampBuilder({ id }) {
   const isNew = id === "new";
 
   const [loading, setLoading] = useState(!isNew);
+  // @feature: bootcamp-description-editing-v1 (2026-08-14)
+  // `description` is rendered to students by LearnPlayer (course map + lesson
+  // sidebar) but had no input here, so the only way to set it was the SQL
+  // editor. Added to state, load(), the upsert payload, and the form below.
   const [bc, setBc] = useState({
     id: isNew ? crypto.randomUUID() : id,
     name: "",
     audience: "",
+    description: "",
     workbook_path: null,
   });
   const [items, setItems] = useState([]);
@@ -93,7 +98,13 @@ export default function BootcampBuilder({ id }) {
       setLoading(false);
       return;
     }
-    setBc({ id: b.id, name: b.name, audience: b.audience || "", workbook_path: b.workbook_path });
+    setBc({
+      id: b.id,
+      name: b.name,
+      audience: b.audience || "",
+      description: b.description || "",
+      workbook_path: b.workbook_path,
+    });
 
     const { data: its } = await supabase
       .from("items")
@@ -308,6 +319,10 @@ export default function BootcampBuilder({ id }) {
         id: bc.id,
         name: bc.name.trim(),
         audience: bc.audience.trim(),
+        // @feature: bootcamp-description-editing-v1 — empty textarea stores NULL
+        // rather than "", so LearnPlayer's `bc?.description ?` guard keeps
+        // hiding the block instead of rendering an empty paragraph.
+        description: bc.description.trim() || null,
         workbook_path: bc.workbook_path,
         created_by: user.id,
       });
@@ -640,6 +655,24 @@ export default function BootcampBuilder({ id }) {
               onChange={(e) => setBc({ ...bc, audience: e.target.value })}
               placeholder="Senior Analysts"
             />
+          </div>
+        </div>
+        {/* @feature: bootcamp-description-editing-v1 — students see this on the
+            course map and in the lesson sidebar. Blank lines are preserved, so a
+            summary paragraph plus a "Required:" line reads as two blocks. */}
+        <div className="field">
+          <label>Description</label>
+          <textarea
+            className="input"
+            rows={5}
+            value={bc.description}
+            onChange={(e) => setBc({ ...bc, description: e.target.value })}
+            placeholder={
+              "What this bootcamp covers, in a sentence or two.\n\nRequired: all lessons, both knowledge checks, the drill workbook, and the final project."
+            }
+          />
+          <div className="note" style={{ marginTop: 4 }}>
+            Shown to students on the course map and beside every lesson. Line breaks are kept.
           </div>
         </div>
         <div className="field" style={{ marginBottom: 0 }}>
