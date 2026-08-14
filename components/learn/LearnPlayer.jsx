@@ -25,12 +25,17 @@
 // never strand a student. Existing completions are untouched — the gate only
 // governs marking something complete from here on.
 //
-// @feature: file-download-tracking-v1 (2026-08-14)
+// @feature: file-download-tracking-v1 (2026-08-13)
 // Nothing recorded that a workbook or project file was opened: both download
 // helpers minted a signed URL and opened it, with no row written. So there was
 // no way to tell whether the drill workbook was being used at all. Every
 // download now logs to public.file_downloads. See logDownload for why it is
 // deliberately fire-and-forget.
+//
+// @feature: workbook-on-map-v1 (2026-08-13)
+// The drill workbook button existed only in the lesson sidebar, so it was
+// unreachable from the course map — the screen students actually land on, and
+// the screen whose own description says the workbook is required. See renderMap.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -610,7 +615,7 @@ export default function LearnPlayer({ bootcampId }) {
     setAnswers((prev) => ({ ...prev, [it.id]: {} }));
   }
 
-  // @feature: file-download-tracking-v1 (2026-08-14)
+  // @feature: file-download-tracking-v1 (2026-08-13)
   // Records that a file was actually opened, into public.file_downloads.
   // Append-only: a repeat download is a real event, so there is no dedupe and no
   // upsert.
@@ -881,6 +886,25 @@ export default function LearnPlayer({ bootcampId }) {
             >
               {bc.description}
             </div>
+          ) : null}
+          {/* @feature: workbook-on-map-v1 (2026-08-13)
+              The workbook button used to exist only in the lesson sidebar, so it
+              was unreachable from this screen — the one students land on, and the
+              one whose own description says the workbook is required. The map was
+              contradicting itself, and a workbook that is hard to find would also
+              have depressed the download signal that file-download-tracking-v1
+              just started measuring, making a placement problem look like a
+              usage problem.
+
+              Placed directly under the description so it answers the "Required:
+              ... the drill workbook" line that sits immediately above it. The
+              sidebar copy stays — it is genuinely useful mid-lesson, and both
+              call the same function, so this is one mechanism with two entry
+              points rather than two mechanisms. */}
+          {bc?.workbook_path ? (
+            <button className="btn ghost sm" style={{ marginTop: 14 }} onClick={downloadWorkbook}>
+              ↓ Download drill workbook
+            </button>
           ) : null}
         </div>
         {items.length === 0 ? (
