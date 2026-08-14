@@ -8,6 +8,14 @@ anything else. The code has always been in git; until 2026-08-12 the database
 was not. That was CRIT-1 of the 2026-08-07 full-stack audit, and it is what
 this folder exists to close.
 
+> **`schema.sql` is currently STALE, knowingly, as of 2026-08-14.** It does not
+> contain `public.file_downloads` (added that day by
+> `file-downloads-migration.sql`). Regenerating it properly means re-reading
+> `pg_catalog` and rewriting sections 2, 4, 9 and 10, and a half-updated
+> authoritative schema is worse than a knowingly-stale one — so it is filed as
+> its own task rather than patched by hand. Read this note before trusting the
+> file's completeness.
+
 ---
 
 ## The one rule
@@ -50,10 +58,13 @@ organisation account:
    connects as `postgres`. If `ensure_rls` is skipped, new tables will be
    created with RLS **off** and no error — that is the one silent failure in
    this whole procedure.
-5. Create the first owner: sign up through the app, then in the SQL editor
+5. Then run every file in `migrations/` in order, plus any root-level
+   `*-migration.sql` not yet folded into `schema.sql` — currently
+   `file-downloads-migration.sql`.
+6. Create the first owner: sign up through the app, then in the SQL editor
    `update public.profiles set role = 'owner' where email = '...'`. The
    `profiles_one_owner` unique index allows only one.
-6. Point `.env.local` and the Vercel environment variables at the new project.
+7. Point `.env.local` and the Vercel environment variables at the new project.
 
 ---
 
@@ -98,22 +109,35 @@ serving gated files only through server-generated signed URLs. Not urgent, and
 not for today — record it and sequence it with CRIT-4, which it resembles: the
 gate exists, it is just enforced one layer higher than it should be.
 
+**This blocks any member-upload feature.** If members are ever asked to upload
+completed drill workbooks into this bucket, fix the storage policy first — the
+gap turns from defence-in-depth into member-authored files readable by any
+signed-in user who can guess a path.
+
 ---
 
 ## What the security linter says
 
 Run `get_advisors` (or Advisors in the dashboard) after any DDL change. As of
-2026-08-12, the state is clean where it matters and noisy where it does not:
+2026-08-14, the state is clean where it matters and noisy where it does not:
 
 **Clean:** no multiple-permissive-policy findings, no RLS-disabled tables in
-`public`. The policy consolidation work held.
+`public`. The policy consolidation work held. `file_downloads` added 2026-08-14
+produced no new finding.
 
 **Real, worth fixing:**
 - `set_updated_at()` has a mutable `search_path`. Add
   `set search_path to 'public'` in a migration.
-- Auth OTP expiry is over an hour. Dashboard toggle.
-- Leaked-password protection is off. Dashboard toggle, and it also answers
-  LOW-11 in the audit.
+- Auth OTP expiry is over an hour. Dashboard toggle, and it governs invite and
+  password-reset link lifetime — both are full credentials for an account, so
+  the default is longer than it needs to be.
+
+**Real but NOT available on this plan:**
+- Leaked-password protection is off, and the linter recommends enabling it.
+  **It is a Pro-only feature.** Confirmed 2026-08-14 — an earlier version of
+  this file listed it as a dashboard toggle, which it is not on the free tier.
+  A linter finding is not the same as an available action; check the plan before
+  acting on one.
 
 **Flagged but not real:** the linter reports `handle_new_user()` and
 `rls_auto_enable()` as anon-executable `SECURITY DEFINER` functions. They
@@ -129,9 +153,8 @@ signature before acting on one of these.
 ## Corrections to the 2026-08-07 audit
 
 The audit inferred the schema from what the code queries, because it could not
-read the database. Three of its inferences were wrong and one was right for the
-wrong reason. Recorded here so the audit is not treated as current on these
-points.
+read the database. Several of its inferences were wrong. Recorded here so the
+audit is not treated as current on these points.
 
 **MED-8 (missing indexes) is mostly a non-issue.** The audit could not verify
 and guessed the hot paths were unindexed. In fact `enrollments(user_id)` and
@@ -147,13 +170,28 @@ missing, and nothing filters archived cohorts out of the pickers yet.
 
 **`items` has two columns the audit does not mention:** `reveal_answers` and
 `allow_retake`, both `boolean not null default true`. Added after 2026-08-07.
-Any successor reading the audit as a complete feature inventory will miss them.
+Any successor reading the audit as a complete feature inventory will miss them —
+and CRIT-7 is the worked example of the cost: `duplicate()` omitted both, so
+copying a blind one-shot baseline check silently produced one that revealed
+answers and allowed retakes.
 
-**CRIT-2 is confirmed exactly as described.**
+**CRIT-2 was FIXED on 2026-08-08 and this file was wrong about it until
+2026-08-14.** The database half is unchanged and still worth knowing:
 `quiz_responses_question_id_fkey` is `on delete cascade` against
-`questions(id)`, and there is a `unique (enrollment_id, question_id)` on top.
-So the delete-then-reinsert in `BootcampBuilder.save()` does destroy answer
-history on every bootcamp save. The audit inferred this; it is now verified.
+`questions(id)`, with a `unique (enrollment_id, question_id)` on top, so
+deleting a question does destroy its answer history. **But
+`BootcampBuilder.save()` no longer deletes and reinserts.** The
+`stable-child-ids-v1` change upserts questions, solutions and files by their
+existing ids and sweeps only rows the editor no longer holds. Verified in
+production on 2026-08-14: a real builder save left all 70 `quiz_responses` rows
+and all 40 question UUIDs untouched, fingerprint-identical before and after.
+
+The lesson is worth more than the correction. This file previously said "CRIT-2
+is confirmed exactly as described" — and what had actually been confirmed was
+the *database* fact, by reading `pg_catalog`. The *code* claim was never
+rechecked and had been stale for five days. Two halves of one finding, verified
+separately, with only one of them actually verified. When recording a
+confirmation, say what it was confirmed against.
 
 ---
 
@@ -161,13 +199,22 @@ history on every bootcamp save. The audit inferred this; it is now verified.
 
 `quiz_responses_backup_20260808` is an ad hoc backup taken before the
 `question_id` migration. It has no constraints and no policies, so RLS-on
-means only `service_role` can read it. It is inert rather than exposed. Decide
-before launch whether to keep it — if kept, it belongs in a non-public schema;
-if dropped, take a real dump first.
+means only `service_role` can read it. It is inert rather than exposed.
+Reconciled 2026-08-14: all 20 of its rows are present in the live
+`quiz_responses` table and every referenced question still exists, so nothing
+in it is unique. Safe to drop on that basis; if kept, it belongs in a
+non-public schema.
 
-**There is still no automated backup.** Supabase's free tier has no
-point-in-time recovery and the dashboard reports no backups. `schema.sql`
-protects the structure; it protects none of the member data. A `pg_dump` before
-each cohort launch and before every migration is the minimum, and member
-training records must not be stored on personal hardware or in a personal
-repository — they need a real destination.
+**There is still no automated backup, and there will not be one.** Supabase's
+free tier has no point-in-time recovery, the dashboard reports no backups, and
+backups are not downloadable for free projects at all. Pro was considered and
+ruled out on 2026-08-14. `schema.sql` protects the structure; it protects none
+of the member data.
+
+The real exposure is not platform failure — it is an unrecoverable mistake. On
+2026-08-14 an example `UPDATE` carrying placeholder text overwrote a live
+bootcamp description, and it was recoverable only because the original wording
+happened to still be readable in a chat transcript. So: an export before every
+migration and before each cohort launch is the minimum, and member training
+records must not be stored on personal hardware or in a personal repository —
+they need a real destination, which is an open decision.
