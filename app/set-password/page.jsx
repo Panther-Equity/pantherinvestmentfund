@@ -75,7 +75,7 @@ function SetPasswordForm() {
       <h1>{isReset ? "Choose a new password" : "Set your password"}</h1>
 
       {checking ? (
-        <p>{isReset ? "Checking your reset link\u2026" : "Checking your invite\u2026"}</p>
+        <p>{isReset ? "Checking your reset link…" : "Checking your invite…"}</p>
       ) : !hasSession ? (
         <>
           <p>
@@ -116,7 +116,7 @@ function SetPasswordForm() {
             />
             <button className="btn pri block" type="submit" disabled={busy}>
               {busy
-                ? "Saving\u2026"
+                ? "Saving…"
                 : isReset
                 ? "Save new password & continue"
                 : "Set password & continue"}
@@ -134,7 +134,7 @@ export default function SetPasswordPage() {
       <div className="loginbox">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src="/logo.png" alt="Panther Equity" />
-        <Suspense fallback={<p>Loading\u2026</p>}>
+        <Suspense fallback={<p>Loading…</p>}>
           <SetPasswordForm />
         </Suspense>
       </div>
