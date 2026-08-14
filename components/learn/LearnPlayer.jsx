@@ -24,6 +24,13 @@
 // unknown (staff hasn't previewed the video yet) so a missing duration can
 // never strand a student. Existing completions are untouched — the gate only
 // governs marking something complete from here on.
+//
+// @feature: file-download-tracking-v1 (2026-08-14)
+// Nothing recorded that a workbook or project file was opened: both download
+// helpers minted a signed URL and opened it, with no row written. So there was
+// no way to tell whether the drill workbook was being used at all. Every
+// download now logs to public.file_downloads. See logDownload for why it is
+// deliberately fire-and-forget.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -602,14 +609,50 @@ export default function LearnPlayer({ bootcampId }) {
     });
     setAnswers((prev) => ({ ...prev, [it.id]: {} }));
   }
+
+  // @feature: file-download-tracking-v1 (2026-08-14)
+  // Records that a file was actually opened, into public.file_downloads.
+  // Append-only: a repeat download is a real event, so there is no dedupe and no
+  // upsert.
+  //
+  // Fire-and-forget, and that is the deliberate part. The signed URL has already
+  // been minted and the window already opened by the time this runs, so a failed
+  // insert costs one data point while a thrown error would cost the student their
+  // file. The table exists for product signal — is the drill workbook being
+  // opened at all — not for integrity, so the asymmetry is the right way round.
+  // Not awaited by callers for the same reason.
+  //
+  // itemId null means the bootcamp-level drill workbook rather than an item file.
+  async function logDownload(path, itemId = null) {
+    if (!enr || !path) return;
+    try {
+      await supabase
+        .from("file_downloads")
+        .insert({ enrollment_id: enr.id, item_id: itemId, path });
+    } catch {
+      // Swallowed on purpose — see above. A missing row is a lost data point,
+      // never a broken download.
+    }
+  }
+
   async function downloadWorkbook() {
     const { data } = await supabase.storage.from("workbooks").createSignedUrl(bc.workbook_path, 3600);
-    if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+    if (data?.signedUrl) {
+      window.open(data.signedUrl, "_blank");
+      // Logged only inside this branch: the row means "a download happened",
+      // not "a button was clicked". A failed signed-URL mint is not a download.
+      logDownload(bc.workbook_path, null);
+    }
   }
   // @feature: project-render-fix-v1 — any file attached to an item.
-  async function downloadFile(path) {
+  // itemId added by file-download-tracking-v1 so the log row can say which item
+  // the file belonged to; every call site has the item in scope already.
+  async function downloadFile(path, itemId = null) {
     const { data } = await supabase.storage.from("workbooks").createSignedUrl(path, 3600);
-    if (data?.signedUrl) window.open(data.signedUrl, "_blank");
+    if (data?.signedUrl) {
+      window.open(data.signedUrl, "_blank");
+      logDownload(path, itemId);
+    }
   }
 
   // Shared completion control. `allowed` false renders it visibly inert with an
@@ -656,7 +699,7 @@ export default function LearnPlayer({ bootcampId }) {
         {resources.length ? (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
             {resources.map((f) => (
-              <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+              <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path, it.id)}>
                 ↓ {f.label || f.path.split("/").pop()}
               </button>
             ))}
@@ -705,7 +748,7 @@ export default function LearnPlayer({ bootcampId }) {
             {gatedFiles.length ? (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
                 {gatedFiles.map((f) => (
-                  <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+                  <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path, it.id)}>
                     ↓ {f.label || f.path.split("/").pop()}
                   </button>
                 ))}
@@ -748,7 +791,7 @@ export default function LearnPlayer({ bootcampId }) {
         {(it.files || []).length ? (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
             {(it.files || []).map((f) => (
-              <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+              <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path, it.id)}>
                 ↓ {f.label || f.path.split("/").pop()}
               </button>
             ))}
@@ -952,7 +995,7 @@ export default function LearnPlayer({ bootcampId }) {
             {(it.files || []).length ? (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0 4px" }}>
                 {(it.files || []).map((f) => (
-                  <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path)}>
+                  <button key={f.id} className="btn ghost sm" onClick={() => downloadFile(f.path, it.id)}>
                     ↓ {f.label || f.path.split("/").pop()}
                   </button>
                 ))}
