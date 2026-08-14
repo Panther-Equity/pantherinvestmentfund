@@ -1,0 +1,58 @@
+name: CI
+
+# Build check on every push and pull request. Deliberately build-only:
+# `npm run lint` is `next lint`, and this repo has no eslint config and no
+# devDependencies, so lint would fail in CI for setup reasons rather than code
+# reasons. Adding lint is a separate decision — on a codebase that has never
+# been linted the first run tends to produce a wall of pre-existing warnings,
+# which either blocks every merge or teaches everyone to ignore a red check.
+#
+# `next build` is the check that actually matches the problem this guards
+# against: it catches syntax errors, bad imports, and anything that will not
+# compile, which is what "main is broken" means in practice.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege: this workflow only needs to read the repository. It does not
+# comment, tag, deploy, or write anything back.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # Placeholder Supabase values. utils/supabase/server.js reads these when it
+    # constructs a client and app/admin/layout.jsx is a server component, so a
+    # build with them undefined can throw during prerender. These are
+    # syntactically valid and never connect to anything — the build constructs
+    # clients but issues no queries. Real credentials are deliberately NOT used:
+    # a compile check has no need for them, and secrets in CI are worth avoiding
+    # until something actually requires them.
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key-for-build-only
+      SUPABASE_SERVICE_ROLE_KEY: placeholder-service-role-key-for-build-only
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # npm ci rather than npm install: it installs exactly what
+      # package-lock.json specifies and fails if the two have drifted, so CI
+      # tests the dependency set that actually ships.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
