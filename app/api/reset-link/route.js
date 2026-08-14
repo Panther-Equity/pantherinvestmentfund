@@ -78,7 +78,12 @@ export async function POST(request) {
     }
 
     const origin = process.env.NEXT_PUBLIC_SITE_URL || new URL(request.url).origin;
-    const resetLink = `${origin}/auth/confirm?token_hash=${hashed}&type=recovery&next=/set-password`;
+    // `next` carries a mode flag so /set-password can say "reset your password"
+    // instead of "finish setting up your account". It is percent-encoded because
+    // it is a query-parameter value that itself contains a query string; leaving
+    // the inner `?` raw would depend on how the parser treats a second `?`.
+    const next = encodeURIComponent("/set-password?mode=reset");
+    const resetLink = `${origin}/auth/confirm?token_hash=${hashed}&type=recovery&next=${next}`;
 
     // Status is deliberately NOT touched. An active member stays active, and a
     // still-invited member stays invited until they actually set a password —
