@@ -54,11 +54,23 @@ export async function POST(request) {
     const admin = createAdminClient();
     const { data: target } = await admin
       .from("profiles")
-      .select("email, full_name, status")
+      .select("email, full_name, status, role")
       .eq("id", userId)
       .single();
     if (!target?.email) {
       return NextResponse.json({ error: "That person no longer exists." }, { status: 404 });
+    }
+
+    // A recovery link is a full credential for the account it names, so an admin
+    // able to mint one for the owner could set the owner's password and take the
+    // account over — privilege escalation, not a reset. Only the owner may
+    // generate a reset link for the owner account. This mirrors
+    // /api/remove-user, which likewise refuses to act on an owner.
+    if (target.role === "owner" && userId !== user.id) {
+      return NextResponse.json(
+        { error: "Only the owner can reset the owner account's password." },
+        { status: 403 }
+      );
     }
 
     const { data, error } = await admin.auth.admin.generateLink({
