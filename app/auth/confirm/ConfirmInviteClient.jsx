@@ -8,12 +8,24 @@ import { useRouter } from "next/navigation";
 // says "you've been invited"; a recovery link says "reset your password".
 // Showing a member who forgot their password an "Accept invite" button reads
 // like the wrong link and is a real reason someone would not click it.
+//
+// @feature: admin-resend-invite-v1 (2026-08-24)
+// Added expired-link handling. Previously any verifyOtp failure showed the
+// raw Supabase error with no next step. Supabase's own wording for both an
+// invalid and an expired token is the same phrase ("Email link is invalid or
+// has expired"), so the /expired|invalid/i check below fires for the
+// ordinary "link sat too long before I clicked it" case, which is the
+// expected one — not a sign anything broke. For invites specifically, the
+// old copy just said "ask an admin"; now it names the actual button
+// (Roster → Resend invite) so the admin doesn't have to re-derive the
+// mechanism either.
 export default function ConfirmInviteClient({ token_hash, type, next }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const isRecovery = type === "recovery";
+  const isExpiredOrInvalid = /expired|invalid/i.test(error);
 
   async function accept() {
     setBusy(true);
@@ -49,7 +61,18 @@ export default function ConfirmInviteClient({ token_hash, type, next }) {
 
   return (
     <div style={{ maxWidth: 420, margin: "60px auto", textAlign: "center" }}>
-      {error && <div className="notice error">{error}</div>}
+      {error && (
+        <div className="notice error">
+          {error}
+          {isExpiredOrInvalid && (
+            <div style={{ marginTop: 8 }}>
+              {isRecovery
+                ? "That's normal — reset links expire. Ask an admin to generate a new one (Roster → Reset)."
+                : "That's normal — invite links expire. Ask an admin to generate a new one (Roster → Resend invite)."}
+            </div>
+          )}
+        </div>
+      )}
       <p>
         {isRecovery
           ? "Confirm to reset your Panther Equity Training Portal password."
