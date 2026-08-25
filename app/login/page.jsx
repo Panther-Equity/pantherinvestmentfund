@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/utils/supabase/client";
 
 export default function LoginPage() {
@@ -63,6 +64,11 @@ export default function LoginPage() {
             {busy ? "Please wait…" : "Sign in"}
           </button>
         </form>
+
+        {/* @feature: self-serve-password-reset-v1 (2026-08-24) */}
+        <div className="toggle">
+          <Link href="/forgot-password">Forgot your password?</Link>
+        </div>
 
         <div className="toggle">Accounts are invite-only — ask an admin for an invite link.</div>
       </div>
