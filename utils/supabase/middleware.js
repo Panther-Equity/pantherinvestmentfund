@@ -11,20 +11,19 @@ import { NextResponse } from "next/server";
 // and route for people who are locked out have to be reachable while
 // locked out.
 //
-// /set-password is here for the same reason PR #8 (still open, not yet
-// merged as of this branch) already added it: this flow's email link uses
-// signInWithOtp, which - like resetPasswordForEmail - lands the browser on
-// the redirect target with the session in a URL fragment the server never
-// sees, not a query param /auth/confirm can read. Without /set-password on
-// this list, that request looks signed-out to this middleware and gets
-// bounced to /login before the page's own client JS ever gets a chance to
-// process the fragment.
+// /set-password is here for the same reason PR #8 already added it: this
+// flow's email link uses signInWithOtp, which - like resetPasswordForEmail -
+// lands the browser on the redirect target with the session in a URL
+// fragment the server never sees, not a query param /auth/confirm can read.
+// Without /set-password on this list, that request looks signed-out to this
+// middleware and gets bounced to /login before the page's own client JS
+// ever gets a chance to process the fragment.
 //
-// MERGE NOTE: PR #8 touches this same allowlist array independently (adds
-// /forgot-password and /set-password). Whichever of these two PRs merges
-// second will show a small textual conflict here - not a logic conflict,
-// just two branches adding overlapping lines to the same list. Resolve by
-// keeping the union of both.
+// MERGED 2026-08-27 (PR #7 + #8). #8 independently added /forgot-password
+// and /set-password to this same array; /set-password was already present
+// from #9 above, so the only actual addition from #8 is /forgot-password.
+// #7 does not touch this file. Resolved as the union, per the MERGE NOTE #8
+// itself left here before either PR landed.
 export async function updateSession(request) {
   let response = NextResponse.next({ request });
 
@@ -59,6 +58,7 @@ export async function updateSession(request) {
     path.startsWith("/login") ||
     path.startsWith("/auth") ||
     path.startsWith("/invite/resend") ||
+    path.startsWith("/forgot-password") ||
     path.startsWith("/set-password") ||
     path === "/api/verify-invite" ||
     path === "/api/invite/resend-self";

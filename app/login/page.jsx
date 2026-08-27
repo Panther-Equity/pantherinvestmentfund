@@ -65,6 +65,11 @@ export default function LoginPage() {
           </button>
         </form>
 
+        {/* @feature: self-serve-password-reset-v1 (2026-08-24) */}
+        <div className="toggle">
+          <Link href="/forgot-password">Forgot your password?</Link>
+        </div>
+
         {/* @feature: self-serve-invite-resend-v1 (2026-08-25) */}
         <div className="toggle">
           <Link href="/invite/resend">Trouble with your invite link?</Link>

@@ -35,6 +35,17 @@ export default function PeoplePage() {
   const [resetFor, setResetFor] = useState("");
   const [resetCopied, setResetCopied] = useState(false);
 
+  // @feature: admin-resend-invite-v1 (2026-08-24)
+  // Same copy-the-link-by-hand shape again, for the third case: an invite
+  // that already went out but expired before the person used it. Kept as
+  // its own card for the same reason reset-link got one — an invite link,
+  // a reset link, and a resent invite link should never be sitting on
+  // screen looking like the same thing.
+  const [resendBusyId, setResendBusyId] = useState(null);
+  const [resendLink, setResendLink] = useState("");
+  const [resendFor, setResendFor] = useState("");
+  const [resendCopied, setResendCopied] = useState(false);
+
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [roleBusyId, setRoleBusyId] = useState(null);
@@ -168,6 +179,47 @@ export default function PeoplePage() {
     setResetLink("");
     setResetFor("");
     setResetCopied(false);
+  }
+
+  // @feature: admin-resend-invite-v1 (2026-08-24)
+  async function resendInvite(person) {
+    setErr("");
+    setMsg("");
+    setResendLink("");
+    setResendCopied(false);
+    setResendBusyId(person.id);
+    try {
+      const res = await fetch("/api/resend-invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: person.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not generate a new invite link.");
+      setResendLink(data.inviteLink);
+      setResendFor(data.email);
+      if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setResendBusyId(null);
+    }
+  }
+
+  async function copyResendLink() {
+    try {
+      await navigator.clipboard.writeText(resendLink);
+      setResendCopied(true);
+      setTimeout(() => setResendCopied(false), 2000);
+    } catch {
+      // Clipboard blocked — the field is selectable as a fallback.
+    }
+  }
+
+  function clearResendLink() {
+    setResendLink("");
+    setResendFor("");
+    setResendCopied(false);
   }
 
   async function changeRole(person, newRole) {
@@ -387,13 +439,42 @@ export default function PeoplePage() {
       <div className="sub">Invite analysts by creating a private invite link, and manage who&rsquo;s an admin.</div>
       <div className="note" style={{ marginBottom: 16, maxWidth: 720 }}>
         Click a name to view their per-bootcamp progress and unassign them from individual bootcamps.{" "}
-        <strong>Reset</strong> generates a private link that lets someone choose a new password without
-        losing any progress. <strong>Remove</strong> deletes the whole account and every enrollment —
-        there&rsquo;s no undo.
+        <strong>Resend invite</strong> generates a fresh link for someone whose original invite expired
+        before they used it. <strong>Reset</strong> generates a private link that lets someone choose a new
+        password without losing any progress. <strong>Remove</strong> deletes the whole account and every
+        enrollment — there&rsquo;s no undo.
       </div>
 
       {err && <div className="notice error" style={{ maxWidth: 720 }}>{err}</div>}
       {msg && <div className="notice ok" style={{ maxWidth: 720 }}>{msg}</div>}
+
+      {/* @feature: admin-resend-invite-v1 — shown above the roster, same
+          reasoning as the reset-link card: land in view right after the
+          button is clicked, and stay visually distinct from the create-invite
+          card and the reset-link card so none of the three get mixed up. */}
+      {resendLink && (
+        <div className="card invite-ready" style={{ maxWidth: 720, marginBottom: 22 }}>
+          <div className="picklabel" style={{ marginBottom: 10 }}>
+            <span>Fresh invite link ready — for {resendFor}</span>
+            <button className="btn link sm" type="button" onClick={clearResendLink}>Done</button>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+            <input
+              className="input mono-input"
+              readOnly
+              value={resendLink}
+              onFocus={(e) => e.target.select()}
+            />
+            <button className="btn pri" type="button" onClick={copyResendLink} style={{ whiteSpace: "nowrap" }}>
+              {resendCopied ? "Copied ✓" : "Copy link"}
+            </button>
+          </div>
+          <div className="note" style={{ marginTop: 10 }}>
+            Send this privately to {resendFor} — it replaces their old invite link, which no longer works.
+            Expires in about 24 hours.
+          </div>
+        </div>
+      )}
 
       {/* @feature: admin-reset-link-v1 — shown above the roster so it lands in
           view after the button is clicked, and kept visually distinct from the
@@ -519,7 +600,7 @@ export default function PeoplePage() {
                       {openCol === col.k && <ColumnMenu col={col} />}
                     </th>
                   ))}
-                  <th style={{ width: 180 }}></th>
+                  <th style={{ width: 230 }}></th>
                 </tr>
               </thead>
               <tbody>
@@ -538,6 +619,11 @@ export default function PeoplePage() {
                     // this; hiding the button matches it so nobody clicks into a
                     // 403. Everyone else on the roster is fair game for staff.
                     const canReset = !isOwnerRow || isSelf;
+                    // @feature: admin-resend-invite-v1 — only makes sense for
+                    // someone who hasn't confirmed yet. /api/resend-invite
+                    // enforces this too; hiding it here matches the API the
+                    // same way canReset matches its own route's owner check.
+                    const canResend = p.status === "invited";
                     return (
                       <tr key={p.id}>
                         <td>
@@ -572,6 +658,17 @@ export default function PeoplePage() {
                         </td>
                         <td style={{ textAlign: "right" }}>
                           <span style={{ display: "inline-flex", gap: 6, justifyContent: "flex-end" }}>
+                            {canResend && (
+                              <button
+                                className="btn ghost sm"
+                                type="button"
+                                title="Generate a fresh invite link"
+                                disabled={resendBusyId === p.id}
+                                onClick={() => resendInvite(p)}
+                              >
+                                {resendBusyId === p.id ? "Generating…" : "Resend invite"}
+                              </button>
+                            )}
                             {canReset && (
                               <button
                                 className="btn ghost sm"

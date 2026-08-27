@@ -12,19 +12,27 @@ import Link from "next/link";
 //
 // @feature: self-serve-invite-resend-v1 (2026-08-25)
 // On an invite-link failure specifically, point at /invite/resend instead of
-// dead-ending on "ask an admin." Recovery-link failures already have their
-// own self-serve path (/forgot-password, PR #8) so this only shows for
-// type==='invite'. Not gated on the specific otp_expired error code -
-// /api/verify-invite only forwards error.message today, not a code, and any
-// invite-verification failure (expired, already used, malformed) is a
-// reasonable prompt to request a fresh one rather than just the expiry case
-// named in the original task.
+// dead-ending on "ask an admin." Not gated on the specific otp_expired error
+// code - /api/verify-invite only forwards error.message today, not a code,
+// and any invite-verification failure (expired, already used, malformed) is
+// a reasonable prompt to request a fresh one rather than just the expiry
+// case named in the original task.
+//
+// MERGED 2026-08-27 (PR #7 + #8, both touched this file). PR #7 added
+// expired/invalid detection with copy written before either self-serve route
+// existed ("ask an admin to hit Resend invite" / "Roster -> Reset"). By the
+// time all three PRs are live, self-serve exists for both link types -
+// /invite/resend (#9, already merged) and /forgot-password (#8, merging in
+// this same pass) - so the copy below points at those instead of an admin
+// action. #7's real contribution kept here is the "that's normal, links
+// expire" framing, which holds regardless of which fix-it path it points to.
 export default function ConfirmInviteClient({ token_hash, type, next }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const isRecovery = type === "recovery";
+  const isExpiredOrInvalid = /expired|invalid/i.test(error);
 
   async function accept() {
     setBusy(true);
@@ -62,12 +70,23 @@ export default function ConfirmInviteClient({ token_hash, type, next }) {
     <div style={{ maxWidth: 420, margin: "60px auto", textAlign: "center" }}>
       {error && (
         <>
-          <div className="notice error">{error}</div>
-          {!isRecovery && (
-            <p>
+          <div className="notice error">
+            {error}
+            {isExpiredOrInvalid && (
+              <div style={{ marginTop: 8 }}>
+                {isRecovery
+                  ? "That's normal — reset links expire."
+                  : "That's normal — invite links expire."}
+              </div>
+            )}
+          </div>
+          <p>
+            {isRecovery ? (
+              <Link href="/forgot-password">Request a new reset link</Link>
+            ) : (
               <Link href="/invite/resend">Request a new invite link</Link>
-            </p>
-          )}
+            )}
+          </p>
         </>
       )}
       <p>
