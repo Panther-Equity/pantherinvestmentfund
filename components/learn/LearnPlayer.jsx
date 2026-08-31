@@ -50,6 +50,15 @@
 //      type in ('knowledge_check','video') specifically — video_series and
 //      project_video completions are unchanged, a separate flagged gap.
 // See knowledge-check-integrity-migration.sql for the database side.
+//
+// @feature: knowledge-check-integrity-v1 follow-up (2026-08-31)
+// The fetch-side fix above stopped this component from asking for
+// answer_index, but RLS on `questions` was still `for select to authenticated
+// using (true)` — any signed-in student could pull the full answer key with a
+// direct REST call regardless of what this file's own select() asks for. A
+// client-chosen column list is not a security boundary. Fixed at the
+// database layer (questions_for_students view, base table restricted to
+// staff) and this fetch now points at the view instead of the table.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -226,7 +235,10 @@ export default function LearnPlayer({ bootcampId }) {
         // @feature: knowledge-check-integrity-v1 (2026-08-31) — answer_index no
         // longer ships to the browser before submission. It comes back from
         // grade_quiz_attempt()'s own response instead, gated on reveal_answers.
-        supabase.from("questions").select("id, item_id, prompt, options, position").in("item_id", ids).order("position"),
+        // Follow-up same day: this now queries the questions_for_students VIEW,
+        // not the questions table directly — the table itself is staff-only now,
+        // so a direct query here would just return zero rows.
+        supabase.from("questions_for_students").select("id, item_id, prompt, options, position").in("item_id", ids).order("position"),
         supabase.from("item_solutions").select("*").in("item_id", ids).order("position"),
         supabase.from("item_steps").select("*").in("item_id", ids).order("position"),
         supabase.from("item_files").select("*").in("item_id", ids).order("position"),
