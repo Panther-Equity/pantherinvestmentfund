@@ -73,7 +73,7 @@ export default function BootcampBuilder({ id }) {
   // @feature: bootcamp-description-editing-v1 (2026-08-14)
   // `description` is rendered to students by LearnPlayer (course map + lesson
   // sidebar) but had no input here, so the only way to set it was the SQL
-  // editor. Added to state, load(), the upsert payload, and the form below.
+  // editor. Added to state, load(), the save payload, and the form below.
   const [bc, setBc] = useState({
     id: isNew ? crypto.randomUUID() : id,
     name: "",
@@ -305,174 +305,95 @@ export default function BootcampBuilder({ id }) {
     e.target.value = ""; // allow re-picking the same file after a remove
   }
 
+  // @feature: atomic-bootcamp-save-v1 (2026-08-31) — CRIT-3
+  // Was ~11 sequential round-trips (bootcamp upsert, items upsert, items
+  // delete-sweep, three child tables upserted then swept, steps upserted then
+  // swept), no transaction. A dropped connection, RLS hiccup, or closed tab
+  // mid-sequence could leave items/questions/solutions/files/steps agreeing
+  // with each other only partially -- the exact failure mode CRIT-3 named.
+  //
+  // Now one call to save_bootcamp(), a Postgres function that does the same
+  // upsert-by-id-then-sweep-by-keep-list work but inside one transaction:
+  // either all of it commits or none of it does. The function preserves both
+  // guarantees this payload-building code relied on:
+  //   - stable child ids (questions/solutions/files/steps keep their
+  //     client-generated id on every save, never delete-and-reinsert, so
+  //     quiz_responses/step_progress FKs never get cascaded away)
+  //   - duration_seconds is never sent, and the function's own UPDATE never
+  //     touches that column either, so a Preview-captured value survives a
+  //     save this component doesn't know about
+  //
+  // position is no longer sent explicitly -- the JSON array's own order IS
+  // the position now; the function assigns it from the loop index.
   async function save() {
     setSaving(true);
     setError("");
     setMsg("");
     try {
       if (!bc.name.trim()) throw new Error("Give the bootcamp a name first.");
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
 
-      const { error: e1 } = await supabase.from("bootcamps").upsert({
-        id: bc.id,
-        name: bc.name.trim(),
-        audience: bc.audience.trim(),
-        // @feature: bootcamp-description-editing-v1 — empty textarea stores NULL
-        // rather than "", so LearnPlayer's `bc?.description ?` guard keeps
-        // hiding the block instead of rendering an empty paragraph.
-        description: bc.description.trim() || null,
-        workbook_path: bc.workbook_path,
-        created_by: user.id,
-      });
-      if (e1) throw e1;
+      const payload = {
+        bootcamp: {
+          id: bc.id,
+          name: bc.name.trim(),
+          audience: bc.audience.trim(),
+          description: bc.description.trim() || null,
+          workbook_path: bc.workbook_path,
+        },
+        items: items.map((it) => {
+          const weight = it.type === "project_video" ? 2 : it.type === "video_series" ? 3 : 1;
+          const row = { id: it.id, type: it.type, title: it.title, weight };
 
-      // NOTE: duration_seconds is deliberately NOT in this payload — omitting it
-      // from the upsert leaves any Preview-captured value untouched on update.
-      // items.template_path is likewise omitted: deprecated by project-files-v1,
-      // superseded by the item_files table.
-      const itemRows = items.map((it, i) => ({
-        id: it.id,
-        bootcamp_id: bc.id,
-        type: it.type,
-        title: it.title,
-        position: i,
-        weight: it.type === "project_video" ? 2 : it.type === "video_series" ? 3 : 1,
-        video_url: it.type === "video" ? it.video_url || null : null,
-        drill_text: it.type === "video" ? it.drill_text || null : null,
-        intro_text:
-          it.type === "video_series" || it.type === "project_video" ? it.intro_text || null : null,
-        timed: it.type === "knowledge_check" ? !!it.timed : false,
-        time_limit_minutes:
-          it.type === "knowledge_check" ? Number(it.time_limit_minutes) || 30 : 30,
-      }));
-      if (itemRows.length) {
-        const { error: e2 } = await supabase.from("items").upsert(itemRows);
-        if (e2) throw e2;
-      }
-
-      // Remove items that were deleted from the list. item_steps and item_files
-      // rows for a deleted item go with it via ON DELETE CASCADE.
-      const itemIds = items.map((it) => it.id);
-      let del = supabase.from("items").delete().eq("bootcamp_id", bc.id);
-      if (itemIds.length) del = del.not("id", "in", `(${itemIds.join(",")})`);
-      const { error: e3 } = await del;
-      if (e3) throw e3;
-
-      // Rewrite questions, solutions, and files for the current items.
-      //
-      // @feature: stable-child-ids-v1 (2026-08-08)
-      // These three tables were previously delete-then-insert, which minted a
-      // fresh UUID for every row on every save. quiz_responses references
-      // questions.id, so each bootcamp save silently cascaded away every
-      // per-question response ever recorded. Every question, solution and file
-      // already carries a stable client-generated id (load() reads it from the
-      // DB; every add path mints one with crypto.randomUUID), so the fix is to
-      // stop discarding it: upsert by id, then sweep the rows the editor no
-      // longer holds. Mirrors the item_steps pattern below.
-      if (itemIds.length) {
-        const qRows = [];
-        const sRows = [];
-        const fRows = [];
-        items.forEach((it) => {
-          if (it.type === "knowledge_check")
-            (it.questions || []).forEach((q, qi) =>
-              qRows.push({
-                id: q.id || crypto.randomUUID(),
-                item_id: it.id,
-                prompt: q.prompt,
-                options: q.options,
-                answer_index: q.answer_index,
-                position: qi,
-              })
-            );
+          if (it.type === "video") {
+            row.video_url = it.video_url || null;
+            row.drill_text = it.drill_text || null;
+          }
+          if (it.type === "video_series" || it.type === "project_video") {
+            row.intro_text = it.intro_text || null;
+          }
+          if (it.type === "knowledge_check") {
+            row.timed = !!it.timed;
+            row.time_limit_minutes = Number(it.time_limit_minutes) || 30;
+            row.questions = (it.questions || []).map((q) => ({
+              id: q.id || crypto.randomUUID(),
+              prompt: q.prompt,
+              options: q.options,
+              answer_index: q.answer_index,
+            }));
+          }
           // Solutions apply to videos (drill solutions), Projects (solution
           // walkthrough), and series (shared pinned resources).
-          if (it.type === "video" || it.type === "project_video" || it.type === "video_series")
-            (it.solutions || []).forEach((s, si) =>
-              sRows.push({
-                id: s.id || crypto.randomUUID(),
-                item_id: it.id,
-                title: s.title,
-                url: s.url,
-                position: si,
-              })
-            );
-          // @feature: project-files-v1 — Projects and video series both carry files.
-          // @feature: gated-files-v1 — `gated` hides the row until confirmation.
-          if (it.type === "project_video" || it.type === "video_series")
-            (it.files || []).forEach((f, fi) =>
-              fRows.push({
-                id: f.id || crypto.randomUUID(),
-                item_id: it.id,
-                position: fi,
-                label: f.label || "",
-                path: f.path,
-                gated: it.type === "project_video" ? !!f.gated : false,
-              })
-            );
-        });
-
-        if (qRows.length) {
-          const { error: eq } = await supabase.from("questions").upsert(qRows);
-          if (eq) throw eq;
-        }
-        if (sRows.length) {
-          const { error: es } = await supabase.from("item_solutions").upsert(sRows);
-          if (es) throw es;
-        }
-        if (fRows.length) {
-          const { error: ef } = await supabase.from("item_files").upsert(fRows);
-          if (ef) throw ef;
-        }
-
-        // Drop children the user removed in the editor. Guarded by the keep-list
-        // so a save can never delete a row that's still on screen.
-        const sweepChildren = async (table, keep) => {
-          let dq = supabase.from(table).delete().in("item_id", itemIds);
-          if (keep.length) dq = dq.not("id", "in", `(${keep.join(",")})`);
-          const { error: esw } = await dq;
-          if (esw) throw esw;
-        };
-        await sweepChildren("questions", qRows.map((r) => r.id));
-        await sweepChildren("item_solutions", sRows.map((r) => r.id));
-        await sweepChildren("item_files", fRows.map((r) => r.id));
-      }
-
-      // @feature: video-series-v1
-      // Steps are upserted by id (not delete-and-reinsert like questions,
-      // solutions, and files) so each step keeps its stable id — student
-      // step_progress rows reference those ids, and any Preview-captured
-      // duration_seconds survives. duration_seconds is omitted for that reason.
-      const seriesIds = items.filter((it) => it.type === "video_series").map((it) => it.id);
-      const stepRows = [];
-      items.forEach((it) => {
-        if (it.type === "video_series")
-          (it.steps || []).forEach((s, si) =>
-            stepRows.push({
+          if (it.type === "video" || it.type === "project_video" || it.type === "video_series") {
+            row.solutions = (it.solutions || []).map((s) => ({
+              id: s.id || crypto.randomUUID(),
+              title: s.title,
+              url: s.url,
+            }));
+          }
+          // @feature: project-files-v1 / gated-files-v1
+          if (it.type === "project_video" || it.type === "video_series") {
+            row.files = (it.files || []).map((f) => ({
+              id: f.id || crypto.randomUUID(),
+              label: f.label || "",
+              path: f.path,
+              gated: it.type === "project_video" ? !!f.gated : false,
+            }));
+          }
+          if (it.type === "video_series") {
+            row.steps = (it.steps || []).map((s) => ({
               id: s.id,
-              item_id: it.id,
-              position: si,
               title: s.title || "",
               video_url: s.video_url || null,
               solution_title: s.solution_title || null,
               solution_url: s.solution_url || null,
-            })
-          );
-      });
-      if (stepRows.length) {
-        const { error: est } = await supabase.from("item_steps").upsert(stepRows);
-        if (est) throw est;
-      }
-      // Drop steps the user removed from a series that still exists.
-      if (seriesIds.length) {
-        const keepIds = stepRows.map((s) => s.id);
-        let dq = supabase.from("item_steps").delete().in("item_id", seriesIds);
-        if (keepIds.length) dq = dq.not("id", "in", `(${keepIds.join(",")})`);
-        const { error: edt } = await dq;
-        if (edt) throw edt;
-      }
+            }));
+          }
+          return row;
+        }),
+      };
+
+      const { error: rpcError } = await supabase.rpc("save_bootcamp", { p_payload: payload });
+      if (rpcError) throw rpcError;
 
       setMsg("Saved. Your changes are live.");
       if (isNew) router.replace(`/admin/bootcamps/${bc.id}`);
