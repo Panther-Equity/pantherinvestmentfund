@@ -36,6 +36,20 @@
 // The drill workbook button existed only in the lesson sidebar, so it was
 // unreachable from the course map — the screen students actually land on, and
 // the screen whose own description says the workbook is required. See renderMap.
+//
+// @feature: knowledge-check-integrity-v1 (2026-08-31) — CRIT-4
+// Two client-writable holes closed, both the same shape: the browser was the
+// source of truth for something that should be server-decided.
+//   1. Quiz grading moved server-side into grade_quiz_attempt(). questions no
+//      longer fetches answer_index; submitCheck() sends raw picks and renders
+//      whatever the RPC hands back. quiz_scores/quiz_responses lost their
+//      direct student INSERT.
+//   2. Marking a plain video item complete moved into mark_watched(), which
+//      re-checks the 90%-watched threshold server-side instead of trusting a
+//      client upsert. completions lost direct student INSERT for
+//      type in ('knowledge_check','video') specifically — video_series and
+//      project_video completions are unchanged, a separate flagged gap.
+// See knowledge-check-integrity-migration.sql for the database side.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -45,7 +59,7 @@ const SKIP_TOLERANCE_SECONDS = 2; // absorbs polling jitter, not a real allowanc
 const POLL_MS = 500;
 const SAVE_INTERVAL_MS = 10000;
 const MIN_DELTA_TO_SAVE = 2; // don't write to the DB for sub-2s progress ticks
-const WATCH_THRESHOLD = 0.9; // fraction of a video that must be watched before it can be marked complete
+const WATCH_THRESHOLD = 0.9; // fraction of a video that must be watched before it can be marked complete — mirrors mark_watched()'s server-side check, used here only for the UI hint
 
 function ytVideoId(url) {
   if (!url) return null;
@@ -161,6 +175,9 @@ export default function LearnPlayer({ bootcampId }) {
   const [seriesStep, setSeriesStep] = useState({}); // item_id -> active step index
   const [stepProgress, setStepProgress] = useState({}); // step_id -> furthest (session-local)
   const [nowTs, setNowTs] = useState(Date.now());
+  // @feature: knowledge-check-integrity-v1 — item_id -> { question_id: answer_index|null },
+  // filled in from grade_quiz_attempt()'s own response. Never populated from the initial load.
+  const [revealed, setRevealed] = useState({});
   const answersRef = useRef(answers);
   answersRef.current = answers;
   const playerRef = useRef(null); // current YT.Player instance, for debugging/inspection only
@@ -206,7 +223,10 @@ export default function LearnPlayer({ bootcampId }) {
       // @feature: project-render-fix-v1 — item_steps and item_files were missing
       // from this fetch, which is the root cause of blank projects and series.
       const [{ data: q }, { data: s }, { data: st }, { data: f }] = await Promise.all([
-        supabase.from("questions").select("*").in("item_id", ids).order("position"),
+        // @feature: knowledge-check-integrity-v1 (2026-08-31) — answer_index no
+        // longer ships to the browser before submission. It comes back from
+        // grade_quiz_attempt()'s own response instead, gated on reveal_answers.
+        supabase.from("questions").select("id, item_id, prompt, options, position").in("item_id", ids).order("position"),
         supabase.from("item_solutions").select("*").in("item_id", ids).order("position"),
         supabase.from("item_steps").select("*").in("item_id", ids).order("position"),
         supabase.from("item_files").select("*").in("item_id", ids).order("position"),
@@ -421,9 +441,10 @@ export default function LearnPlayer({ bootcampId }) {
   const pct = totalW ? Math.round((100 * doneW) / totalW) : 0;
 
   // @feature: watch-gate-v1
-  // True when an item is allowed to be marked complete. Deliberately permissive:
-  // anything that isn't a plain video passes, and a video with no known duration
-  // passes, so a gap in staff-side duration capture can never trap a student.
+  // UI hint only as of knowledge-check-integrity-v1 — mark_watched() is the
+  // real gate now. This stays so the "Mark complete" control still shows as
+  // disabled/enabled at the right moment instead of always being clickable
+  // and failing silently against the server.
   function watchGateOk(it) {
     if (!it) return true;
     if (it.type === "video_series") {
@@ -472,6 +493,13 @@ export default function LearnPlayer({ bootcampId }) {
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  // @feature: knowledge-check-integrity-v1 (2026-08-31)
+  // Marking a plain `video` item complete now goes through mark_watched() --
+  // CRIT-4 named this as the same client-writable-completions hole as the
+  // quiz one. RLS no longer grants a direct INSERT into completions for
+  // type='video' (or 'knowledge_check'), so the old upsert path would just
+  // fail silently for those two types now; video_series and project_video
+  // are unchanged here -- a separate, already-flagged gap.
   async function toggleComplete(it) {
     if (completed.has(it.id)) {
       await supabase.from("completions").delete().eq("enrollment_id", enr.id).eq("item_id", it.id);
@@ -480,12 +508,21 @@ export default function LearnPlayer({ bootcampId }) {
         n.delete(it.id);
         return n;
       });
-    } else {
-      await supabase
-        .from("completions")
-        .upsert({ enrollment_id: enr.id, item_id: it.id }, { onConflict: "enrollment_id,item_id", ignoreDuplicates: true });
-      setCompleted((prev) => new Set(prev).add(it.id));
+      return;
     }
+    if (it.type === "video") {
+      const { data: ok } = await supabase.rpc("mark_watched", {
+        p_enrollment_id: enr.id,
+        p_item_id: it.id,
+      });
+      if (!ok) return; // gate not actually met server-side; UI hint was wrong or stale
+      setCompleted((prev) => new Set(prev).add(it.id));
+      return;
+    }
+    await supabase
+      .from("completions")
+      .upsert({ enrollment_id: enr.id, item_id: it.id }, { onConflict: "enrollment_id,item_id", ignoreDuplicates: true });
+    setCompleted((prev) => new Set(prev).add(it.id));
   }
 
   // @feature: project-render-fix-v1
@@ -543,46 +580,34 @@ export default function LearnPlayer({ bootcampId }) {
     setAttempts((prev) => ({ ...prev, [it.id]: { started_at: startedAt, submitted_at: null } }));
     setNowTs(Date.now());
   }
+  // @feature: knowledge-check-integrity-v1 (2026-08-31) — CRIT-4
+  // Scoring moved server-side into grade_quiz_attempt(). The client no longer
+  // computes a score or writes quiz_scores/quiz_responses directly (RLS no
+  // longer grants it INSERT on either table); it hands over the raw picks and
+  // renders whatever the RPC returns. answer_index for the post-submit review
+  // only ever exists in this component after this call returns, and only when
+  // the item's reveal_answers allows it.
   async function submitCheck(it) {
     const picks = answersRef.current[it.id] || {};
-    let score = 0;
-    // @feature: quiz-per-question-review-v1 — same loop that already scored the
-    // check also builds the per-question row set, so scoring logic lives in
-    // exactly one place.
-    const responseRows = it.questions.map((q) => {
-      const selectedIndex = picks[q.id];
-      const correct = selectedIndex === q.answer_index;
-      if (correct) score++;
-      return {
-        enrollment_id: enr.id,
-        item_id: it.id,
-        question_id: q.id,
-        // -1 marks a question left blank — untimed checks require every
-        // question before Submit enables, but a timed check can auto-submit
-        // early with some unanswered.
-        selected_index: selectedIndex ?? -1,
-        correct,
-      };
+    const responses = it.questions.map((q) => ({
+      question_id: q.id,
+      selected_index: picks[q.id] ?? -1,
+    }));
+    const { data, error } = await supabase.rpc("grade_quiz_attempt", {
+      p_enrollment_id: enr.id,
+      p_item_id: it.id,
+      p_responses: responses,
     });
-    const total = it.questions.length;
-    await supabase
-      .from("quiz_scores")
-      .upsert({ enrollment_id: enr.id, item_id: it.id, score, total }, { onConflict: "enrollment_id,item_id" });
-    if (responseRows.length) {
-      // Upsert overwrites cleanly on retake — no separate delete needed here.
-      await supabase.from("quiz_responses").upsert(responseRows, { onConflict: "enrollment_id,question_id" });
+    if (error) {
+      setSubError(error.message || "Couldn't submit. Try again, or let staff know.");
+      return;
     }
-    await supabase
-      .from("completions")
-      .upsert({ enrollment_id: enr.id, item_id: it.id }, { onConflict: "enrollment_id,item_id", ignoreDuplicates: true });
-    if (it.timed) {
-      await supabase
-        .from("quiz_attempts")
-        .update({ submitted_at: new Date().toISOString() })
-        .eq("enrollment_id", enr.id)
-        .eq("item_id", it.id);
-    }
+    const { score, total, results } = data;
     setSubmitted((prev) => ({ ...prev, [it.id]: { score, total } }));
+    setRevealed((prev) => ({
+      ...prev,
+      [it.id]: Object.fromEntries((results || []).map((r) => [r.question_id, r.answer_index])),
+    }));
     setCompleted((prev) => new Set(prev).add(it.id));
     setAttempts((prev) =>
       prev[it.id] ? { ...prev, [it.id]: { ...prev[it.id], submitted_at: new Date().toISOString() } } : prev
@@ -608,6 +633,11 @@ export default function LearnPlayer({ bootcampId }) {
       });
     }
     setSubmitted((prev) => {
+      const n = { ...prev };
+      delete n[it.id];
+      return n;
+    });
+    setRevealed((prev) => {
       const n = { ...prev };
       delete n[it.id];
       return n;
@@ -1105,8 +1135,12 @@ export default function LearnPlayer({ bootcampId }) {
                       // @feature: baseline-check-integrity-v1 — a check with
                       // reveal_answers false scores silently. Without this, one
                       // blind submission hands over the complete key.
+                      // @feature: knowledge-check-integrity-v1 (2026-08-31) —
+                      // answer_index comes from the graded RPC response now,
+                      // never from the initial questions fetch.
+                      const revealedAnswerIdx = (revealed[it.id] || {})[q.id];
                       if (res && revealAnswers) {
-                        if (oi === q.answer_index) cls += " correct";
+                        if (revealedAnswerIdx != null && oi === revealedAnswerIdx) cls += " correct";
                         else if (myPick === oi) cls += " wrong";
                       } else if (myPick === oi) cls += " sel";
                       return (
