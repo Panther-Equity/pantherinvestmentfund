@@ -10,6 +10,12 @@ function fmtDeadline(d) {
   if (isNaN(dt)) return d;
   return dt.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
+function fmtWhen(ts) {
+  if (!ts) return null;
+  const dt = new Date(ts);
+  if (isNaN(dt)) return ts;
+  return dt.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
 function kindLabel(t) {
   return t === "knowledge_check" ? "Knowledge check" : t === "project_video" ? "Project" : "Video";
 }
@@ -35,6 +41,15 @@ export default function LearnerDetailPage() {
 
   // @feature: quiz-per-question-review-v1 — which knowledge-check rows are expanded
   const [expandedQuiz, setExpandedQuiz] = useState(new Set());
+
+  // @feature: submissions-review-v1 (2026-08-31) — HIGH-1. Which project rows
+  // are expanded, plus busy/error state for the unlock action. Nothing about
+  // this needed a new tab-navigation pattern — the app doesn't have one
+  // anywhere else, and this is one more expandable panel on the same per-item
+  // row shape the quiz review already uses.
+  const [expandedSub, setExpandedSub] = useState(new Set());
+  const [subBusyKey, setSubBusyKey] = useState(null); // `${enrollmentId}:${itemId}` currently saving
+  const [subErr, setSubErr] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -65,7 +80,8 @@ export default function LearnerDetailPage() {
       comps = [],
       scores = [],
       responses = [], // @feature: quiz-per-question-review-v1
-      timeProg = []; // @feature: time-based-progress-v1
+      timeProg = [], // @feature: time-based-progress-v1
+      submissions = []; // @feature: submissions-review-v1
     if (bootcampIds.length) {
       const { data: its } = await supabase
         .from("items")
@@ -77,6 +93,10 @@ export default function LearnerDetailPage() {
       if (itemIds.length) {
         // @feature: quiz-per-question-review-v1 — prompts/options/answer key,
         // fetched regardless of item type; only knowledge_check rows will match.
+        // Staff-only path: this queries the base `questions` table directly,
+        // which is fine here (unlike the student-facing LearnPlayer, which was
+        // moved to questions_for_students) because "staff q" already grants
+        // staff full access including answer_index.
         const { data: qs } = await supabase
           .from("questions")
           .select("id, item_id, prompt, options, answer_index, position")
@@ -86,7 +106,7 @@ export default function LearnerDetailPage() {
       }
     }
     if (enrollmentIds.length) {
-      const [{ data: c }, { data: s }, { data: rs }, { data: tp }] = await Promise.all([
+      const [{ data: c }, { data: s }, { data: rs }, { data: tp }, { data: ps }] = await Promise.all([
         supabase.from("completions").select("enrollment_id, item_id").in("enrollment_id", enrollmentIds),
         supabase
           .from("quiz_scores")
@@ -100,11 +120,21 @@ export default function LearnerDetailPage() {
           .from("enrollment_time_progress") // @feature: time-based-progress-v1
           .select("enrollment_id, time_pct")
           .in("enrollment_id", enrollmentIds),
+        // @feature: submissions-review-v1 (2026-08-31) — HIGH-1. This table was
+        // never fetched anywhere in the admin UI before this; the only way to
+        // see who submitted, when, or to unlock a solution was direct table
+        // access in the Supabase dashboard, which is exactly what the audit
+        // named as the gap ("contradicts the no-code-successor goal").
+        supabase
+          .from("project_submissions")
+          .select("enrollment_id, item_id, path, filename, submitted_at, unlocked_by_staff")
+          .in("enrollment_id", enrollmentIds),
       ]);
       comps = c || [];
       scores = s || [];
       responses = rs || []; // @feature: quiz-per-question-review-v1
       timeProg = tp || [];
+      submissions = ps || []; // @feature: submissions-review-v1
     }
 
     const timePctMap = Object.fromEntries(timeProg.map((t) => [t.enrollment_id, t.time_pct])); // @feature: time-based-progress-v1
@@ -125,6 +155,13 @@ export default function LearnerDetailPage() {
         .forEach((r) => {
           (responsesByItem[r.item_id] = responsesByItem[r.item_id] || []).push(r);
         });
+      // @feature: submissions-review-v1 — this enrollment's submission rows,
+      // by item. A project_video item with no row here just hasn't been
+      // touched yet (no submission, no staff override) — that's the
+      // "Not submitted yet" case in the panel below, not an error state.
+      const submissionMap = Object.fromEntries(
+        submissions.filter((sub) => sub.enrollment_id === e.id).map((sub) => [sub.item_id, sub])
+      );
       const totalW = its.reduce((sum, i) => sum + (i.weight || 1), 0);
       const doneW = its.filter((i) => compSet.has(i.id)).reduce((sum, i) => sum + (i.weight || 1), 0);
       const pct = totalW ? Math.round((100 * doneW) / totalW) : 0;
@@ -151,6 +188,8 @@ export default function LearnerDetailPage() {
             type: i.type,
             done: compSet.has(i.id),
             score: scoreMap[i.id] || null,
+            // @feature: submissions-review-v1 — null means no row yet, not "loading"
+            submission: i.type === "project_video" ? submissionMap[i.id] || null : null,
             questions:
               i.type === "knowledge_check"
                 ? itemQuestions.map((q) => ({ ...q, response: responseMap[q.id] || null }))
@@ -217,6 +256,67 @@ export default function LearnerDetailPage() {
       else n.add(itemId);
       return n;
     });
+  }
+
+  // @feature: submissions-review-v1 (2026-08-31)
+  function toggleSubExpand(itemId) {
+    setExpandedSub((prev) => {
+      const n = new Set(prev);
+      if (n.has(itemId)) n.delete(itemId);
+      else n.add(itemId);
+      return n;
+    });
+  }
+
+  // @feature: submissions-review-v1 (2026-08-31)
+  // Staff already has full read/write on project_submissions ("staff manage
+  // submissions", for all, is_staff()) -- no new route or RPC needed, this is
+  // a direct client call same as the deadline edit above. Update when a row
+  // exists; insert when it doesn't (an unlock with no submission at all is a
+  // deliberate staff override, so submitted_at is explicitly left null rather
+  // than picking up the column's now() default).
+  async function toggleUnlock(enrollmentId, itemId, existing) {
+    setSubErr("");
+    const busyKey = `${enrollmentId}:${itemId}`;
+    setSubBusyKey(busyKey);
+    let data, error;
+    if (existing) {
+      ({ data, error } = await supabase
+        .from("project_submissions")
+        .update({ unlocked_by_staff: !existing.unlocked_by_staff })
+        .eq("enrollment_id", enrollmentId)
+        .eq("item_id", itemId)
+        .select("enrollment_id, item_id, path, filename, submitted_at, unlocked_by_staff"));
+    } else {
+      ({ data, error } = await supabase
+        .from("project_submissions")
+        .insert({ enrollment_id: enrollmentId, item_id: itemId, unlocked_by_staff: true, submitted_at: null })
+        .select("enrollment_id, item_id, path, filename, submitted_at, unlocked_by_staff"));
+    }
+    setSubBusyKey(null);
+    if (error || !data || data.length === 0) {
+      setSubErr(error?.message || "Couldn't update — no permission, or the row changed under us.");
+      return;
+    }
+    const updated = data[0];
+    setRows((prev) =>
+      prev.map((r) =>
+        r.id !== enrollmentId
+          ? r
+          : { ...r, items: r.items.map((it) => (it.id === itemId ? { ...it, submission: updated } : it)) }
+      )
+    );
+  }
+
+  // @feature: submissions-review-v1 (2026-08-31)
+  // "own submission read file" on storage.objects already grants staff read
+  // on every object in the submissions bucket (is_staff() OR own folder), so
+  // this is a direct signed-URL mint, same pattern as LearnPlayer's own
+  // downloadFile/downloadWorkbook.
+  async function downloadSubmission(path) {
+    if (!path) return;
+    const { data } = await supabase.storage.from("submissions").createSignedUrl(path, 3600);
+    if (data?.signedUrl) window.open(data.signedUrl, "_blank");
   }
 
   // v3: unassign (hard delete; children cascade)
@@ -363,6 +463,11 @@ export default function LearnerDetailPage() {
                     const isQuiz = it.type === "knowledge_check";
                     const canExpand = isQuiz && !!it.score;
                     const isOpen = expandedQuiz.has(it.id);
+                    // @feature: submissions-review-v1
+                    const isProject = it.type === "project_video";
+                    const subOpen = expandedSub.has(it.id);
+                    const sub = it.submission;
+                    const busyKey = `${r.id}:${it.id}`;
                     return (
                       <div key={it.id} style={{ borderTop: idx ? "1px solid var(--line)" : "none" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 0" }}>
@@ -407,6 +512,19 @@ export default function LearnerDetailPage() {
                               onClick={() => toggleQuizExpand(it.id)}
                             >
                               {isOpen ? "Hide answers" : "Show answers"}
+                            </button>
+                          )}
+                          {/* @feature: submissions-review-v1 — every project row gets this,
+                              not just submitted ones, since "nobody's submitted yet" is
+                              itself useful for staff to see rather than a row that just
+                              has no expand control at all. */}
+                          {isProject && (
+                            <button
+                              className="btn link sm"
+                              style={{ padding: "2px 4px", whiteSpace: "nowrap" }}
+                              onClick={() => toggleSubExpand(it.id)}
+                            >
+                              {subOpen ? "Hide submission" : "Show submission"}
                             </button>
                           )}
                         </div>
@@ -458,6 +576,51 @@ export default function LearnerDetailPage() {
                                   </div>
                                 );
                               })
+                            )}
+                          </div>
+                        )}
+                        {/* @feature: submissions-review-v1 (2026-08-31) — HIGH-1 */}
+                        {isProject && subOpen && (
+                          <div style={{ padding: "0 0 14px 28px" }}>
+                            <div className="note" style={{ fontSize: 13, marginBottom: 6 }}>
+                              {sub?.submitted_at
+                                ? `Submitted ${fmtWhen(sub.submitted_at)}`
+                                : "Not submitted yet."}
+                            </div>
+                            {sub?.path ? (
+                              <button
+                                className="btn ghost sm"
+                                style={{ marginBottom: 8 }}
+                                onClick={() => downloadSubmission(sub.path)}
+                              >
+                                ↓ {sub.filename || sub.path.split("/").pop()}
+                              </button>
+                            ) : (
+                              <div className="note" style={{ fontSize: 12, marginBottom: 8 }}>
+                                No file attached — confirmation is click-only for this bootcamp.
+                              </div>
+                            )}
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <span className="note" style={{ fontSize: 12 }}>
+                                Solution walkthrough: {sub?.unlocked_by_staff ? "unlocked" : "locked"}
+                                {sub?.submitted_at ? " (also unlocks on submission)" : ""}
+                              </span>
+                              <button
+                                className="btn sm ghost"
+                                disabled={subBusyKey === busyKey}
+                                onClick={() => toggleUnlock(r.id, it.id, sub)}
+                              >
+                                {subBusyKey === busyKey
+                                  ? "…"
+                                  : sub?.unlocked_by_staff
+                                  ? "Re-lock"
+                                  : "Unlock for this person"}
+                              </button>
+                            </div>
+                            {subErr && (
+                              <div className="notice error" style={{ marginTop: 8, maxWidth: 420 }}>
+                                {subErr}
+                              </div>
                             )}
                           </div>
                         )}
