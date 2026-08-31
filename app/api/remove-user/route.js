@@ -38,6 +38,14 @@ export async function POST(request) {
     if (target.role === "owner") {
       return NextResponse.json({ error: "You can't remove the owner account." }, { status: 400 });
     }
+    // @feature: admin-delete-owner-only-v1 (2026-08-31) -- HIGH-9. Role
+    // editing was already owner-only ("owner writes profiles" RLS policy);
+    // role *removal* wasn't, so any admin could delete another admin and
+    // cascade away their enrollments/completions/scores. Matches the
+    // existing pattern rather than introducing a new one.
+    if (target.role === "admin" && me.role !== "owner") {
+      return NextResponse.json({ error: "Only the owner can remove an admin." }, { status: 403 });
+    }
 
     // Clear references that don't cascade, so the delete isn't blocked.
     await admin.from("bootcamps").update({ created_by: null }).eq("created_by", userId);
