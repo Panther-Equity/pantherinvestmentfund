@@ -2,6 +2,22 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/utils/supabase/server";
 import { createAdminClient } from "@/utils/supabase/admin";
 
+// SECURITY NOTE, added during the 2026-08-07 audit cleanup: the
+// transfer_ownership() Postgres function verifies that current_owner names
+// the real owner and new_owner is an active admin, but it does NOT verify
+// that the CALLER is current_owner -- it trusts whatever id this route
+// passes in. What actually keeps this safe is that EXECUTE on the function
+// is granted only to postgres and service_role, not to anon or authenticated
+// -- so the only path to calling it at all is this route, using the admin
+// (service-role) client below, after the me.role !== "owner" check above.
+//
+// If that grant is ever widened to authenticated -- for some unrelated
+// reason, by someone who doesn't know this -- any signed-in student could
+// call transfer_ownership directly over PostgREST with an arbitrary
+// current_owner/new_owner pair and demote the real owner. The check in this
+// route would then be decorative. Do not widen that grant without adding
+// caller verification inside the function itself first.
+
 export async function POST(request) {
   try {
     const supabase = createClient();
