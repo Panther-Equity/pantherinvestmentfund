@@ -1,0 +1,54 @@
+name: Deploy
+
+# Deploys through the Vercel CLI instead of the Vercel Git integration, so the
+# repo can be private: Vercel Hobby cannot deploy private GitHub-org repos via
+# the integration. Same behavior as before: every branch push gets a preview
+# deployment, a push to main deploys production. Also removes Hobby's rule
+# that only the account owner's commits deploy, since deploys run on the
+# VERCEL_TOKEN owner's identity rather than the commit author's.
+#
+# The build runs on Vercel, not on this runner: `vercel deploy` uploads the
+# source and Vercel builds it exactly as the Git integration did, with the
+# project's own env vars. Building here with `vercel pull` + `vercel build`
+# failed, because sensitive env vars cannot be pulled and came back empty
+# (first run, 2026-10-03). The only repo secrets are the token and two IDs.
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy per ref at a time. Superseded preview deploys get cancelled;
+# a production deploy is never cancelled mid-flight.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+  VERCEL_ENV: ${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }}
+  PROD_FLAG: ${{ github.ref == 'refs/heads/main' && '--prod' || '' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install the Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Deploy (Vercel builds remotely)
+        run: |
+          url=$(vercel deploy $PROD_FLAG --yes --token=${{ secrets.VERCEL_TOKEN }})
+          echo "Deployed ($VERCEL_ENV): $url" >> "$GITHUB_STEP_SUMMARY"
